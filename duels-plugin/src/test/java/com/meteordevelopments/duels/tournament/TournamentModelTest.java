@@ -63,6 +63,7 @@ class TournamentModelTest {
         assertTrue(TournamentMatchStatus.FINISHED.isTerminal());
         assertTrue(TournamentMatchStatus.WAITING_PLAYER.isPending());
         assertTrue(TournamentMatchStatus.STARTING.isRunning());
+        assertTrue(TournamentMatchStatus.IN_PROGRESS.isRunning());
         assertFalse(TournamentMatchStatus.READY.isRunning());
         assertFalse(TournamentMatchStatus.CANCELLED.isPending());
     }

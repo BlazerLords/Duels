@@ -1089,7 +1089,8 @@ public class TournamentManager implements Loadable, Listener {
             }
 
             final TournamentMatch match = findTournamentMatch(tournament, players[0].getName(), players[1].getName());
-            if (match == null || match.getStatus() != TournamentMatchStatus.IN_PROGRESS) {
+            // MatchStartEvent is fired synchronously while launchStartingMatch still has STARTING status.
+            if (match == null || !match.getStatus().isRunning()) {
                 continue;
             }
 
