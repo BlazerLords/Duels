@@ -10,6 +10,7 @@ import java.net.URLConnection;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.logging.Logger;
 import java.util.stream.Stream;
 
 import com.meteordevelopments.duels.DuelsPlugin;
@@ -18,45 +19,40 @@ import org.json.JSONObject;
 
 @SuppressWarnings("all")
 public class UpdateManager {
-    private DuelsPlugin main;
+    private static final int NETWORK_TIMEOUT_MILLIS = 5_000;
+
+    private final Logger logger;
+    private final boolean stayUpToDate;
     private URL spigotUrl;
-    private boolean updateIsAvailable = false;
-    private String currentVersion;
+    private volatile boolean updateIsAvailable = false;
+    private final String currentVersion;
     @Getter
-    private String latestVersion;
+    private volatile String latestVersion;
 
     public UpdateManager(DuelsPlugin main) {
-        this.main = main;
+        this.logger = main.getLogger();
+        this.currentVersion = main.getDescription().getVersion();
+        this.stayUpToDate = main.getConfiguration().isStayUpToDate();
     }
 
     public void checkForUpdate() {
-        // Check for the latest version from Spigot
-        if (this.spigotUrl == null) {
-            try {
+        try {
+            if (this.spigotUrl == null) {
                 this.spigotUrl = new URL("https://version.itzadarsh-kushwaha.workers.dev/legacy/update.php");
-            } catch (Exception e) {
-                e.printStackTrace();
             }
-        }
-
-        URLConnection spigotConnection = null;
-
-        try {
-            spigotConnection = this.spigotUrl.openConnection();
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-
-        try {
-            this.latestVersion = (new BufferedReader(new InputStreamReader(spigotConnection.getInputStream()))).readLine();
-        } catch (IOException e) {
-            e.printStackTrace();
+            URLConnection spigotConnection = openConnection(this.spigotUrl);
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(spigotConnection.getInputStream()))) {
+                this.latestVersion = reader.readLine();
+            }
+        } catch (IOException ex) {
+            logger.warning("Could not check for a Duels update: " + ex.getMessage());
+            return;
         }
 
         if (this.latestVersion != null && !this.getCurrentVersion().equals(this.latestVersion)) {
             this.setLatestVersion(this.latestVersion);
             this.setUpdateAvailability(true);
-            if (main.getConfiguration().isStayUpToDate()) {
+            if (stayUpToDate) {
                 fetchAndDownloadFromModrinth();
             }
         }
@@ -65,14 +61,14 @@ public class UpdateManager {
     private void fetchAndDownloadFromModrinth() {
         try {
             URL modrinthUrl = new URL("https://api.modrinth.com/v2/project/duels-optimised/version/" + this.latestVersion);
-            URLConnection modrinthConnection = modrinthUrl.openConnection();
-            BufferedReader in = new BufferedReader(new InputStreamReader(modrinthConnection.getInputStream()));
+            URLConnection modrinthConnection = openConnection(modrinthUrl);
             StringBuilder response = new StringBuilder();
             String inputLine;
-            while ((inputLine = in.readLine()) != null) {
-                response.append(inputLine);
+            try (BufferedReader in = new BufferedReader(new InputStreamReader(modrinthConnection.getInputStream()))) {
+                while ((inputLine = in.readLine()) != null) {
+                    response.append(inputLine);
+                }
             }
-            in.close();
 
             // Parse JSON response
             String jsonResponse = response.toString();
@@ -85,8 +81,8 @@ public class UpdateManager {
             // Download the latest plugin
             downloadLatestPlugin(downloadUrl);
 
-        } catch (Exception e) {
-            e.printStackTrace();
+        } catch (Exception ex) {
+            logger.warning("Could not download the latest Duels update: " + ex.getMessage());
         }
     }
 
@@ -97,26 +93,33 @@ public class UpdateManager {
                     .forEach(path -> {
                         try {
                             Files.delete(path);
-                        } catch (IOException e) {
-                            e.printStackTrace();
+                        } catch (IOException ex) {
+                            logger.warning("Could not delete old Duels JAR " + path + ": " + ex.getMessage());
                         }
                     });
-        } catch (IOException e) {
-            e.printStackTrace();
+        } catch (IOException ex) {
+            logger.warning("Could not inspect the plugins directory for updates: " + ex.getMessage());
         }
     }
 
     private void downloadLatestPlugin(String downloadUrl) {
-        try (BufferedInputStream in = new BufferedInputStream(new URL(downloadUrl).openStream());
+        try (BufferedInputStream in = new BufferedInputStream(openConnection(new URL(downloadUrl)).getInputStream());
              FileOutputStream fileOutputStream = new FileOutputStream("plugins/Duels-Optimised-" + this.latestVersion + ".jar")) {
             byte dataBuffer[] = new byte[1024];
             int bytesRead;
             while ((bytesRead = in.read(dataBuffer, 0, 1024)) != -1) {
                 fileOutputStream.write(dataBuffer, 0, bytesRead);
             }
-        } catch (IOException e) {
-            e.printStackTrace();
+        } catch (IOException ex) {
+            logger.warning("Could not write the latest Duels update: " + ex.getMessage());
         }
+    }
+
+    private URLConnection openConnection(URL url) throws IOException {
+        URLConnection connection = url.openConnection();
+        connection.setConnectTimeout(NETWORK_TIMEOUT_MILLIS);
+        connection.setReadTimeout(NETWORK_TIMEOUT_MILLIS);
+        return connection;
     }
 
     public boolean updateIsAvailable() {
@@ -128,9 +131,6 @@ public class UpdateManager {
     }
 
     public String getCurrentVersion() {
-        if (this.currentVersion == null) {
-            this.currentVersion = this.main.getDescription().getVersion();
-        }
         return this.currentVersion;
     }
 

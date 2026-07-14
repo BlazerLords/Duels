@@ -51,7 +51,7 @@ public class KitItemListener implements Listener {
         this.guard = KitGuardManager.init(plugin);
 
         if (config.isProtectKitItems())
-            Bukkit.getPluginManager().registerEvents(this, plugin);
+            plugin.registerListener(this);
     }
 
     private boolean isExcluded(final Player player) {

@@ -185,6 +185,8 @@ public class Config extends AbstractConfiguration<DuelsPlugin> {
     @Getter
     private boolean specAddInvisibilityEffect;
     @Getter
+    private boolean specHideJoinMessageFromFighters;
+    @Getter
     private List<String> specWhitelistedCommands;
     @Getter
     private boolean cdEnabled;
@@ -446,6 +448,7 @@ public class Config extends AbstractConfiguration<DuelsPlugin> {
         specRequiresClearedInventory = configuration.getBoolean("spectate.requires-cleared-inventory", false);
         specUseSpectatorGamemode = configuration.getBoolean("spectate.use-spectator-gamemode", false);
         specAddInvisibilityEffect = configuration.getBoolean("spectate.add-invisibility-effect", true);
+        specHideJoinMessageFromFighters = configuration.getBoolean("spectate.hide-join-message-from-fighters", false);
         specWhitelistedCommands = configuration.getStringList("spectate.whitelisted-commands");
 
         cdEnabled = configuration.getBoolean("countdown.enabled", true);

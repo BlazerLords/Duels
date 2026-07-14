@@ -3,6 +3,7 @@ package com.meteordevelopments.duels.gui.options;
 import lombok.Getter;
 import com.meteordevelopments.duels.DuelsPlugin;
 import com.meteordevelopments.duels.gui.options.buttons.OptionButton;
+import com.meteordevelopments.duels.gui.options.destructible.DestructibleArenaButton;
 import com.meteordevelopments.duels.core.kit.KitImpl;
 import com.meteordevelopments.duels.core.kit.KitImpl.Characteristic;
 import com.meteordevelopments.duels.util.compat.Items;
@@ -35,6 +36,7 @@ public class OptionsGui extends SinglePageGui<DuelsPlugin> {
 
         final ItemStack spacing = Items.WHITE_PANE.clone();
         Slots.run(9, 18, slot -> inventory.setItem(slot, spacing));
+        set(13, new DestructibleArenaButton(plugin, this, kit));
     }
 
     @Override
@@ -44,33 +46,48 @@ public class OptionsGui extends SinglePageGui<DuelsPlugin> {
 
     public enum Option {
 
-        USEPERMISSION(Material.BARRIER, KitImpl::isUsePermission, kit -> kit.setUsePermission(!kit.isUsePermission()), "When enabled, players must", "have the permission duels.kits.%kit%", "to select this kit for duel."),
-        ARENASPECIFIC(Items.EMPTY_MAP, KitImpl::isArenaSpecific, kit -> kit.setArenaSpecific(!kit.isArenaSpecific()), "When enabled, kit %kit%", "can only be used in", "arenas it is bound to."),
-        SOUP(Items.MUSHROOM_SOUP, Characteristic.SOUP, "When enabled, players will", "receive the amount of health", "defined in config when", "right-clicking a soup."),
-        SUMO(Material.SLIME_BALL, Characteristic.SUMO, "When enabled, players will ", "lose health only when", "interacting with water or lava."),
-        UHC(Material.GOLDEN_APPLE, Characteristic.UHC, "When enabled, player's health", "will not naturally regenerate."),
-        COMBO(Material.IRON_SWORD, Characteristic.COMBO, "When enabled, players will", "have no delay between hits."),
-        LOKA(Material.DIAMOND_SWORD, Characteristic.LOKA, "When enabled, player,s damage", "will get increased by 33%"),
-        HUNGER(Material.COOKED_BEEF, Characteristic.HUNGER, "When enabled, players will", "not hungry."),
-        ROUNDS3(Material.GOLD_INGOT, Characteristic.ROUNDS3, "When enabled, duels will", "have 3 rounds.");
-/*      PLACE(Material.STONE, Characteristic.PLACE, "When enabled, players can", "be placed blocks in arena."),
-        BREAK(Material.STONE, Characteristic.BREAK, "When enabled, players can", "be break blocks in arena.");*/
+        USEPERMISSION("Требовать разрешение", Material.BARRIER, KitImpl::isUsePermission,
+                kit -> kit.setUsePermission(!kit.isUsePermission()),
+                "Для выбора кита игроку потребуется", "право duels.kits.%kit%."),
+        ARENASPECIFIC("Привязка к аренам", Items.EMPTY_MAP, KitImpl::isArenaSpecific,
+                kit -> kit.setArenaSpecific(!kit.isArenaSpecific()),
+                "Кит можно использовать только", "на привязанных к нему аренах."),
+        SOUP("Лечебные супы", Items.MUSHROOM_SOUP, Characteristic.SOUP,
+                "Суп восстанавливает здоровье", "при нажатии правой кнопкой мыши."),
+        SUMO("Режим сумо", Material.SLIME_BALL, Characteristic.SUMO,
+                "Обычный урон отключён.", "Поражение засчитывается в воде или лаве."),
+        UHC("Отключить регенерацию", Material.GOLDEN_APPLE, Characteristic.UHC,
+                "Естественное восстановление", "здоровья будет отключено."),
+        COMBO("Режим комбо", Material.IRON_SWORD, Characteristic.COMBO,
+                "Убирает задержку между", "последовательными ударами."),
+        LOKA("Усиленный урон", Material.DIAMOND_SWORD, Characteristic.LOKA,
+                "Урон игроков увеличивается", "на 33 процента."),
+        HUNGER("Отключить голод", Material.COOKED_BEEF, Characteristic.HUNGER,
+                "Уровень голода игроков", "не будет уменьшаться."),
+        ROUNDS3("Три раунда", Material.GOLD_INGOT, Characteristic.ROUNDS3,
+                "Матч проводится до победы", "в двух из трёх раундов.");
         @Getter
         private final Material displayed;
         @Getter
         private final String[] description;
+        @Getter
+        private final String displayName;
 
         private final Function<KitImpl, Boolean> getter;
         private final Consumer<KitImpl> setter;
 
-        Option(final Material displayed, final Function<KitImpl, Boolean> getter, final Consumer<KitImpl> setter, final String... description) {
+        Option(final String displayName, final Material displayed, final Function<KitImpl, Boolean> getter,
+               final Consumer<KitImpl> setter, final String... description) {
+            this.displayName = displayName;
             this.displayed = displayed;
             this.description = description;
             this.getter = getter;
             this.setter = setter;
         }
 
-        Option(final Material displayed, final Characteristic characteristic, final String... description) {
+        Option(final String displayName, final Material displayed, final Characteristic characteristic,
+               final String... description) {
+            this.displayName = displayName;
             this.displayed = displayed;
             this.description = description;
             this.getter = kit -> kit.hasCharacteristic(characteristic);

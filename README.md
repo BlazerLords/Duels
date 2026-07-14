@@ -1,69 +1,64 @@
-<h1>Duels</h1>
+# Duels Optimised
 
-[![](https://jitpack.io/v/dumbo-the-developer/Duels.svg)](https://jitpack.io/#dumbo-the-developer/Duels)
+Paper-плагин для дуэлей, очередей и турниров на выбывание. Эта версия дополнена
+турнирной системой, привязкой произвольных FancyNPC к турнирам и общим модулем
+разрушаемых арен для обычных и турнирных матчей.
 
----
+## Возможности
 
-* **[Wiki](https://docs.meteordevelopments.com)**
-* **[Support Discord](https://discord.meteordevelopments.com)**
+- дуэли 1x1 и командные дуэли, очереди, ставки и наблюдение;
+- киты с отдельными правилами и GUI `/duels options <kit>`;
+- арены с точками появления, иконками и границами `min/max`;
+- турниры с фиксированным китом или выбором кита игроками;
+- отдельные списки разрешённых китов и арен для каждого турнира;
+- регистрация через команду, меню или привязанный FancyNPC;
+- CMI-голограммы с сеткой, активными матчами и итогами;
+- ожидание отключившегося участника в течение двух минут и возврат в матч после входа;
+- разрушаемые PvP-арены без WorldEdit/FAWE/WorldGuard;
+- пакетное восстановление только изменённых блоков;
+- аварийное восстановление арены после перезапуска сервера;
+- русские сообщения и интерфейсы добавленных модулей.
 
-### Getting the dependency
+## Требования
 
-#### Repository
+- Paper-сервер;
+- Java 25 для запуска этой сборки и Gradle toolchain;
+- протестировано на Paper 1.21.11;
+- для сборки нужен доступ к Maven-репозиториям из `build.gradle`.
 
-Gradle:
+WorldEdit, FAWE и WorldGuard не нужны для разрушаемых арен. Интеграции с
+FancyNpcs, HeadDB, CMI и другими плагинами являются дополнительными: без них
+основные дуэли и турниры продолжают работать.
 
-```groovy
-maven {
-    name 'jitpack-repo'
-    url 'https://jitpack.io'
-}
+## Быстрый запуск
+
+1. Соберите проект: `./gradlew :duels-plugin:shadowJar`.
+2. Возьмите `out/Duels-Optimised-7.3.jar`.
+3. Поместите JAR в `plugins/` и полностью перезапустите Paper.
+4. Создайте лобби, кит и арену по [инструкции установки](docs/INSTALLATION.md).
+5. Для разрушаемого кита установите обе границы арены и включите опцию через
+   `/duels options <kit>`.
+
+## Документация
+
+- [Установка и первичная настройка](docs/INSTALLATION.md)
+- [Команды и права](docs/COMMANDS.md)
+- [Турниры, NPC и голограммы](docs/TOURNAMENTS.md)
+- [Разрушаемые арены и автореген](docs/DESTRUCTIBLE_ARENAS.md)
+- [Эксплуатация, данные и восстановление](docs/OPERATIONS.md)
+
+## Сборка и тесты
+
+```bash
+./gradlew :duels-plugin:test :duels-plugin:shadowJar
 ```
 
-Maven:
+Проект использует Gradle Wrapper. Основной модуль находится в `duels-plugin`,
+публичный API в `duels-api`, адаптеры WorldGuard в `duels-worldguard*`.
 
-```xml
-<repository>
-  <id>jitpack-repo</id>
-  <url>https://jitpack.io</url>
-</repository>
-```
+## Передача сервера
 
-#### Dependency
-
-Gradle:
-
-```groovy
-implementation 'com.github.dumbo-the-developer.Duels:duels-api:VERSION'
-```  
-
-Maven:
-
-```xml
-<dependency>
-    <groupId>com.github.dumbo-the-developer.Duels</groupId>
-    <artifactId>duels-api</artifactId>
-    <version>VERSION</version>
-    <scope>provided</scope>
-</dependency>
-```
-
-### plugin.yml
-
-Add Duels as a soft-depend to ensure Duels is fully loaded before your plugin.
-
-```yaml
-soft-depend: [Duels]
-```
-
-### Getting the API instance
-
-```java
-@Override
-public void onEnable() {
-  Duels api = (Duels) Bukkit.getServer().getPluginManager().getPlugin("Duels");
-}
-```
-
-### Javadocs
-* **[Javadocs](https://javadocs.meteordevelopments.com/duels)**
+Перед обновлением сохраните каталог `plugins/Duels/`. Передавайте вместе с JAR
+как минимум `config.yml`, `lang.yml`, данные китов/арен, `tournaments.yml` и
+`tournament-lobby.json`. Не удаляйте `arena-recovery.yml`, пока все арены не
+перешли в состояние `READY`.

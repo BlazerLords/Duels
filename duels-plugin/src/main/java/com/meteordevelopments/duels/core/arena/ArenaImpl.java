@@ -3,6 +3,7 @@ package com.meteordevelopments.duels.core.arena;
 import com.meteordevelopments.duels.core.countdown.DuelCountdown;
 import com.meteordevelopments.duels.core.countdown.party.PartyDuelCountdown;
 import com.meteordevelopments.duels.core.match.DuelMatch;
+import com.meteordevelopments.duels.core.match.MatchLifecycleState;
 import com.meteordevelopments.duels.core.match.party.PartyDuelMatch;
 import com.meteordevelopments.duels.core.match.team.TeamDuelMatch;
 import com.meteordevelopments.duels.party.Party;
@@ -18,8 +19,10 @@ import com.meteordevelopments.duels.api.event.match.MatchEndEvent;
 import com.meteordevelopments.duels.api.event.match.MatchEndEvent.Reason;
 import com.meteordevelopments.duels.gui.BaseButton;
 import com.meteordevelopments.duels.core.kit.KitImpl;
+import com.meteordevelopments.duels.arena.destructible.ArenaBounds;
 import com.meteordevelopments.duels.core.queue.Queue;
 import com.meteordevelopments.duels.setting.Settings;
+import com.meteordevelopments.duels.util.Log;
 import com.meteordevelopments.duels.util.compat.Items;
 import com.meteordevelopments.duels.util.inventory.ItemBuilder;
 import org.bukkit.Bukkit;
@@ -197,17 +200,16 @@ public class ArenaImpl extends BaseButton implements Arena {
         return minBound != null && maxBound != null;
     }
 
+    @Nullable
+    public ArenaBounds getArenaBounds() {
+        return ArenaBounds.of(minBound, maxBound);
+    }
+
     public boolean isInBounds(Location loc) {
-        if (!hasBounds())
+        ArenaBounds bounds = getArenaBounds();
+        if (bounds == null)
             return true;
-        if (!loc.getWorld().equals(minBound.getWorld()))
-            return false;
-        return loc.getX() >= Math.min(minBound.getX(), maxBound.getX())
-            && loc.getX() <= Math.max(minBound.getX(), maxBound.getX())
-            && loc.getY() >= Math.min(minBound.getY(), maxBound.getY())
-            && loc.getY() <= Math.max(minBound.getY(), maxBound.getY())
-            && loc.getZ() >= Math.min(minBound.getZ(), maxBound.getZ())
-            && loc.getZ() <= Math.max(minBound.getZ(), maxBound.getZ());
+        return bounds.contains(loc);
     }
 
     public boolean isBoundless() {
@@ -233,7 +235,11 @@ public class ArenaImpl extends BaseButton implements Arena {
     }
 
     public boolean isAvailable() {
-        return !isDisabled() && !isUsed() && getPosition(1) != null && getPosition(2) != null;
+        boolean sessionReady = plugin.getDestructibleArenaService() == null
+                || plugin.getDestructibleArenaService().getRegistry().byArena(name) == null
+                || plugin.getDestructibleArenaService().getRegistry().byArena(name).getState()
+                == com.meteordevelopments.duels.arena.destructible.SessionState.READY;
+        return !isDisabled() && !isUsed() && sessionReady && getPosition(1) != null && getPosition(2) != null;
     }
 
     public DuelMatch startMatch(final KitImpl kit, final Map<UUID, List<ItemStack>> items, final Settings settings, final Queue source) {
@@ -244,68 +250,63 @@ public class ArenaImpl extends BaseButton implements Arena {
         } else {
             this.match = new DuelMatch(plugin, this, kit, items, settings.getBet(), source);
         }
+        this.match.markPreparing();
         refreshGui(false);
         return match;
     }
 
     public void endMatch(final UUID winner, final UUID loser, final Reason reason) {
-        if (!isUsed()) {
+        final DuelMatch endingMatch = match;
+        if (endingMatch == null) {
             return; // Match already ended — guard against double endgame
+        }
+        if (endingMatch.getLifecycleState() != MatchLifecycleState.FINISHING
+                && !endingMatch.tryBeginFinishing()) {
+            return;
+        }
+        if (!endingMatch.tryBeginRestoring()) {
+            return;
         }
         spectateManager.stopSpectating(this);
 
-        final MatchEndEvent event = new MatchEndEvent(match, winner, loser, reason);
+        final MatchEndEvent event = new MatchEndEvent(endingMatch, winner, loser, reason);
         Bukkit.getPluginManager().callEvent(event);
 
-        final Queue source = match.getSource();
-        match.setFinished();
+        final Queue source = endingMatch.getSource();
+        endingMatch.setFinished();
+        final boolean destructibleSession = plugin.getDestructibleArenaService().finish(endingMatch);
 
-        for(Block block : match.placedBlocks) {
-            block.setType(Material.AIR);
-        }
+        if (!destructibleSession) {
+            for(Block block : endingMatch.placedBlocks) {
+                block.setType(Material.AIR);
+            }
 
-        for(Map.Entry<Location, BlockData> map : match.brokenBlocks.entrySet()) {
-            map.getKey().getBlock().setBlockData(map.getValue());
-        }
+            for(Map.Entry<Location, BlockData> map : endingMatch.brokenBlocks.entrySet()) {
+                map.getKey().getBlock().setBlockData(map.getValue());
+            }
 
-        for (Entity entity : match.placedEntities){
-            entity.remove();
-        }
+            for (Entity entity : endingMatch.placedEntities){
+                entity.remove();
+            }
 
-        for (Block block : match.liquids) {
-            Location loc = block.getLocation();
-            int radius = 1;
-
-            while (true) {
-                boolean waterFound = false;
-
-                for (int x = -radius; x <= radius; x++) {
-                    for (int y = -radius; y <= radius; y++) {
-                        for (int z = -radius; z <= radius; z++) {
-                            Block findBlock = loc.clone().add(x, y, z).getBlock();
-                            String type = findBlock.getType().name().toLowerCase();
-
-                            if (type.contains("water") || type.contains("lava") || type.contains("cobblestone") || type.contains("obsidian")) {
-                                waterFound = true;
-                                findBlock.setType(Material.AIR);
-                            }
-                        }
-                    }
+            for (Block block : endingMatch.liquids) {
+                if (block.getType() == Material.WATER || block.getType() == Material.LAVA) {
+                    block.setType(Material.AIR);
                 }
-
-                if (!waterFound) {
-                    break;
-                }
-
-                radius++;
             }
         }
 
         if(config.isClearItemsAfterMatch()) {
-            match.droppedItems.forEach(Entity::remove);
+            endingMatch.droppedItems.forEach(Entity::remove);
         }
 
+        arenaManager.clearPlayerIndex(endingMatch.getAllPlayers(), this);
         match = null;
+        if (reason == Reason.PLUGIN_DISABLE || reason == Reason.OTHER) {
+            endingMatch.markCancelled();
+        } else {
+            endingMatch.markCompleted();
+        }
 
         if (source != null) {
             source.update();
@@ -313,6 +314,41 @@ public class ArenaImpl extends BaseButton implements Arena {
         }
 
         refreshGui(true);
+    }
+
+    /**
+     * Releases a match that failed during preparation without publishing a match-end event.
+     * Any destructible-arena session already created for the match is still restored normally.
+     *
+     * @param expectedMatch match instance that must currently own this arena
+     * @return true when the arena was released
+     */
+    public boolean abortMatchStart(final DuelMatch expectedMatch) {
+        if (match != expectedMatch) {
+            return false;
+        }
+
+        final Queue source = expectedMatch.getSource();
+        try {
+            plugin.getDestructibleArenaService().finish(expectedMatch);
+        } catch (RuntimeException ex) {
+            Log.error("Could not clean destructible session after failed match start on arena " + name, ex);
+        } finally {
+            arenaManager.clearPlayerIndex(expectedMatch.getAllPlayers(), this);
+            expectedMatch.markError();
+            match = null;
+        }
+
+        if (source != null) {
+            try {
+                source.update();
+                queueManager.getGui().calculatePages();
+            } catch (RuntimeException ex) {
+                Log.error("Could not update queue after failed match start on arena " + name, ex);
+            }
+        }
+        refreshGui(true);
+        return true;
     }
 
     public void startCountdown() {
@@ -334,9 +370,15 @@ public class ArenaImpl extends BaseButton implements Arena {
         return isUsed() && !match.isDead(player);
     }
 
+    public boolean hasParticipant(@NotNull final Player player) {
+        Objects.requireNonNull(player, "player");
+        return isUsed() && match.getAllPlayers().contains(player);
+    }
+
     public void add(final Player player) {
         if (isUsed()) {
             match.addPlayer(player);
+            arenaManager.indexPlayer(player, this);
         }
     }
 

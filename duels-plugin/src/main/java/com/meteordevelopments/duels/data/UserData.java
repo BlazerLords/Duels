@@ -1,6 +1,5 @@
 package com.meteordevelopments.duels.data;
 
-import com.google.common.base.Charsets;
 import com.google.common.collect.Lists;
 import lombok.Getter;
 import lombok.Setter;
@@ -8,13 +7,15 @@ import com.meteordevelopments.duels.api.kit.Kit;
 import com.meteordevelopments.duels.api.user.MatchInfo;
 import com.meteordevelopments.duels.api.user.User;
 import com.meteordevelopments.duels.util.Log;
+import com.meteordevelopments.duels.util.io.AtomicFileWriter;
 import com.meteordevelopments.duels.util.json.JsonUtil;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.io.*;
+import java.io.File;
+import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -44,11 +45,16 @@ public class UserData implements User {
     }
 
     public UserData(final File folder, final int defaultRating, final int matchesToDisplay, final Player player) {
+        this(folder, defaultRating, matchesToDisplay, player.getUniqueId(), player.getName());
+    }
+
+    public UserData(final File folder, final int defaultRating, final int matchesToDisplay,
+                    final UUID uuid, final String name) {
         this.folder = folder;
         this.defaultRating = defaultRating;
         this.matchesToDisplay = matchesToDisplay;
-        this.uuid = player.getUniqueId();
-        this.name = player.getName();
+        this.uuid = Objects.requireNonNull(uuid, "uuid");
+        this.name = Objects.requireNonNull(name, "name");
     }
 
     @Override
@@ -193,18 +199,11 @@ public class UserData implements User {
         matches.addAll(division);
     }
 
-    public void trySave() {
+    public synchronized void trySave() {
         final File file = new File(folder, uuid + ".json");
 
         try {
-            if (!file.exists()) {
-                file.createNewFile();
-            }
-
-            try (final Writer writer = new OutputStreamWriter(new FileOutputStream(file), Charsets.UTF_8)) {
-                JsonUtil.getObjectWriter().writeValue(writer, this);
-                writer.flush();
-            }
+            AtomicFileWriter.writeUtf8(file, JsonUtil.getObjectWriter().writeValueAsString(this));
         } catch (IOException ex) {
             Log.error(String.format(ERROR_USER_SAVE, name), ex);
         }

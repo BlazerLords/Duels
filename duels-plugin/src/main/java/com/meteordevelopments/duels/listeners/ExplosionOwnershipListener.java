@@ -1,7 +1,6 @@
 package com.meteordevelopments.duels.listeners;
 
 import com.meteordevelopments.duels.DuelsPlugin;
-import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.entity.EnderCrystal;
@@ -38,7 +37,7 @@ public class ExplosionOwnershipListener implements Listener {
 
     public ExplosionOwnershipListener(final DuelsPlugin plugin) {
         this.plugin = plugin;
-        Bukkit.getPluginManager().registerEvents(this, plugin);
+        plugin.registerListener(this);
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)

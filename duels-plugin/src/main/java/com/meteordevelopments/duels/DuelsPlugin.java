@@ -2,12 +2,16 @@ package com.meteordevelopments.duels;
 
 import com.google.common.collect.Lists;
 import com.meteordevelopments.duels.command.commands.party.PartyCommand;
+import com.meteordevelopments.duels.command.commands.TournamentCommand;
 import com.meteordevelopments.duels.config.CommandsConfig;
 import com.meteordevelopments.duels.core.kit.edit.KitEditListener;
 import com.meteordevelopments.duels.core.kit.edit.KitEditManager;
 import com.meteordevelopments.duels.listeners.*;
 import com.meteordevelopments.duels.party.PartyManagerImpl;
 import com.meteordevelopments.duels.util.*;
+import com.meteordevelopments.duels.tournament.TournamentNpcListener;
+import com.meteordevelopments.duels.tournament.TournamentManager;
+import com.meteordevelopments.duels.arena.destructible.DestructibleArenaService;
 import com.meteordevelopments.duels.core.validator.ValidatorManager;
 import com.meteordevelopments.duels.api.folialib.FoliaLib;
 import com.meteordevelopments.duels.util.kitguard.KitGuardManager;
@@ -45,6 +49,7 @@ import com.meteordevelopments.duels.util.Log.LogSource;
 import com.meteordevelopments.duels.util.command.AbstractCommand;
 import com.meteordevelopments.duels.util.gui.GuiListener;
 import com.meteordevelopments.duels.util.json.JsonUtil;
+import com.meteordevelopments.duels.util.lifecycle.PluginTaskRegistry;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.command.CommandMap;
@@ -60,6 +65,8 @@ import java.io.IOException;
 import java.util.*;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 @SuppressWarnings("deprecation")
@@ -78,7 +85,8 @@ public class DuelsPlugin extends JavaPlugin implements Duels, LogSource {
     private final List<Loadable> loadables = new ArrayList<>();
     private final Map<String, AbstractCommand<DuelsPlugin>> commands = new HashMap<>();
     private final Map<String, String> commandKeyMap = new HashMap<>();
-    private final List<Listener> registeredListeners = new ArrayList<>();
+    private final Set<Listener> registeredListeners = Collections.newSetFromMap(new IdentityHashMap<>());
+    private final PluginTaskRegistry taskRegistry = new PluginTaskRegistry();
     private int lastLoad;
     @Getter
     private LogManager logManager;
@@ -122,6 +130,10 @@ public class DuelsPlugin extends JavaPlugin implements Duels, LogSource {
     private PartyManagerImpl partyManager;
     @Getter
     private ValidatorManager validatorManager;
+    @Getter
+    private TournamentManager tournamentManager;
+    @Getter
+    private DestructibleArenaService destructibleArenaService;
     private CommandsConfig commandsConfig;
     private static final Logger LOGGER = Logger.getLogger("[Duels-Optimised]");
 
@@ -200,6 +212,7 @@ public class DuelsPlugin extends JavaPlugin implements Duels, LogSource {
      * @return true if unload was successful, otherwise false
      */
     private boolean unload() {
+        taskRegistry.cancelAll();
         unregisterPluginCommands();
         registeredListeners.forEach(HandlerList::unregisterAll);
         registeredListeners.clear();
@@ -283,6 +296,7 @@ public class DuelsPlugin extends JavaPlugin implements Duels, LogSource {
         final CommandsConfig.CommandSettings spectate = commandsConfig.get(CommandsConfig.CommandKey.SPECTATE);
         final CommandsConfig.CommandSettings duels = commandsConfig.get(CommandsConfig.CommandKey.DUELS);
         final CommandsConfig.CommandSettings kit = commandsConfig.get(CommandsConfig.CommandKey.KIT);
+        final CommandsConfig.CommandSettings tournament = commandsConfig.get(CommandsConfig.CommandKey.TOURNAMENT);
 
         // Store mappings from original keys to actual names for API compatibility
         commandKeyMap.put("duel", duel.getName().toLowerCase());
@@ -291,6 +305,7 @@ public class DuelsPlugin extends JavaPlugin implements Duels, LogSource {
         commandKeyMap.put("spectate", spectate.getName().toLowerCase());
         commandKeyMap.put("duels", duels.getName().toLowerCase());
         commandKeyMap.put("kit", kit.getName().toLowerCase());
+        commandKeyMap.put("tournament", tournament.getName().toLowerCase());
 
         registerCommands(
             new DuelCommand(this, duel),
@@ -298,7 +313,8 @@ public class DuelsPlugin extends JavaPlugin implements Duels, LogSource {
             new QueueCommand(this, queue),
             new SpectateCommand(this, spectate),
             new DuelsCommand(this, duels),
-            new KitCommand(this, kit)
+            new KitCommand(this, kit),
+            new TournamentCommand(this, tournament)
         );
 
         sendMessage("&dSuccessfully registered commands [" + CC.getTimeDifferenceAndColor(start, System.currentTimeMillis()) + ChatColor.WHITE + "]");
@@ -317,7 +333,10 @@ public class DuelsPlugin extends JavaPlugin implements Duels, LogSource {
 
         for (final AbstractCommand<DuelsPlugin> command : commands) {
             this.commands.put(command.getName().toLowerCase(), command);
-            final PluginCommand pc = createPluginCommand(command.getName());
+            PluginCommand pc = getCommand(command.getName());
+            if (pc == null) {
+                pc = createPluginCommand(command.getName());
+            }
             if (pc == null) {
                 getLogger().warning("Failed to create PluginCommand for '" + command.getName() + "'. Skipping.");
                 continue;
@@ -432,16 +451,10 @@ public class DuelsPlugin extends JavaPlugin implements Duels, LogSource {
 
         final String commandLower = command.toLowerCase();
         
-        // Debug logging
-        getLogger().info("Attempting to register subcommand '" + subCommand.getName() + "' to parent command '" + commandLower + "'");
-        getLogger().info("Available commands: " + commands.keySet());
-        getLogger().info("Command key mappings: " + commandKeyMap);
-        
         // Try direct lookup first, then check if it's an original key that maps to a different name
         AbstractCommand<DuelsPlugin> result = commands.get(commandLower);
         if (result == null) {
             final String mappedName = commandKeyMap.get(commandLower);
-            getLogger().info("Direct lookup failed, trying mapped name: " + mappedName);
             if (mappedName != null) {
                 result = commands.get(mappedName);
             }
@@ -463,21 +476,17 @@ public class DuelsPlugin extends JavaPlugin implements Duels, LogSource {
                 subCommand.execute(sender, label, args);
             }
         });
-        
-        getLogger().info("Successfully registered subcommand '" + subCommand.getName() + "' to '" + commandLower + "'");
         return true;
     }
 
     @Override
     public void registerListener(@NotNull final Listener listener) {
-        sendMessage("&eRegistering post listeners...");
-        long start = System.currentTimeMillis();
-
         Objects.requireNonNull(listener, "listener");
-        registeredListeners.add(listener);
+        if (!registeredListeners.add(listener)) {
+            return;
+        }
         Bukkit.getPluginManager().registerEvents(listener, this);
-
-        sendMessage("&dSuccessfully registered listeners after plugin startup in [" + CC.getTimeDifferenceAndColor(start, System.currentTimeMillis()) + ChatColor.WHITE + "]");
+        getLogger().info("Registered listener: " + listener.getClass().getSimpleName());
     }
 
     @Override
@@ -487,6 +496,8 @@ public class DuelsPlugin extends JavaPlugin implements Duels, LogSource {
             return false;
         }
 
+        registerAllCommands();
+        loadPreListeners();
         return true;
     }
 
@@ -513,45 +524,59 @@ public class DuelsPlugin extends JavaPlugin implements Duels, LogSource {
     @Override
     public WrappedTask doSync(@NotNull final Runnable task) {
         Objects.requireNonNull(task, "task");
-        return DuelsPlugin.foliaLib.getScheduler().runLater(task, 1L);
+        return scheduleOneShot(task, wrapped -> DuelsPlugin.foliaLib.getScheduler().runLater(wrapped, 1L));
     }
 
     @Override
     public WrappedTask doSyncAfter(@NotNull final Runnable task, final long delay) {
         Objects.requireNonNull(task, "task");
-        return DuelsPlugin.foliaLib.getScheduler().runLater(task, delay);
+        return scheduleOneShot(task, wrapped -> DuelsPlugin.foliaLib.getScheduler().runLater(wrapped, delay));
     }
 
     @Override
     public WrappedTask doSyncRepeat(@NotNull final Runnable task, final long delay, final long period) {
         Objects.requireNonNull(task, "task");
         long safeDelay = Math.max(1, delay);
-        return DuelsPlugin.foliaLib.getScheduler().runTimer(task, safeDelay, period);
+        return taskRegistry.track(DuelsPlugin.foliaLib.getScheduler().runTimer(task, safeDelay, period));
     }
 
 
     @Override
     public WrappedTask doAsync(@NotNull final Runnable task) {
         Objects.requireNonNull(task, "task");
-        return DuelsPlugin.foliaLib.getScheduler().runLaterAsync(task, 1L);
+        return scheduleOneShot(task, wrapped -> DuelsPlugin.foliaLib.getScheduler().runLaterAsync(wrapped, 1L));
     }
 
     @Override
     public WrappedTask doAsyncAfter(@NotNull final Runnable task, final long delay) {
         Objects.requireNonNull(task, "task");
-        return DuelsPlugin.foliaLib.getScheduler().runLaterAsync(task, delay);
+        return scheduleOneShot(task, wrapped -> DuelsPlugin.foliaLib.getScheduler().runLaterAsync(wrapped, delay));
     }
 
     @Override
     public WrappedTask doAsyncRepeat(@NotNull final Runnable task, final long delay, final long period) {
         Objects.requireNonNull(task, "task");
-        return DuelsPlugin.foliaLib.getScheduler().runTimerAsync(task, delay, period);
+        return taskRegistry.track(DuelsPlugin.foliaLib.getScheduler().runTimerAsync(task, delay, period));
     }
 
     @Override
     public void cancelTask(@NotNull final WrappedTask task) {
         Objects.requireNonNull(task, "task");
-        task.cancel();
+        taskRegistry.cancel(task);
+    }
+
+    private WrappedTask scheduleOneShot(Runnable task, Function<Runnable, WrappedTask> scheduler) {
+        AtomicReference<WrappedTask> reference = new AtomicReference<>();
+        Runnable tracked = () -> {
+            try {
+                task.run();
+            } finally {
+                taskRegistry.complete(reference.get());
+            }
+        };
+        WrappedTask scheduled = scheduler.apply(tracked);
+        reference.set(scheduled);
+        return taskRegistry.track(scheduled);
     }
 
     @Override
@@ -671,6 +696,7 @@ public class DuelsPlugin extends JavaPlugin implements Duels, LogSource {
         loadAndTrack("party manager", () -> loadables.add(partyManager = new PartyManagerImpl(this)));
         loadAndTrack("kit manager", () -> loadables.add(kitManager = new KitManagerImpl(this)));
         loadAndTrack("arena manager", () -> loadables.add(arenaManager = new ArenaManagerImpl(this)));
+        loadAndTrack("destructible arena service", () -> loadables.add(destructibleArenaService = new DestructibleArenaService(this)));
         loadAndTrack("settings manager", () -> loadables.add(settingManager = new SettingsManager(this)));
         loadAndTrack("player manager", () -> loadables.add(playerManager = new PlayerInfoManager(this)));
         loadAndTrack("spectate manager", () -> loadables.add(spectateManager = new SpectateManagerImpl(this)));
@@ -683,6 +709,7 @@ public class DuelsPlugin extends JavaPlugin implements Duels, LogSource {
         loadAndTrack("hook manager", () -> hookManager = new HookManager(this));
         loadAndTrack("validator manager", () -> loadables.add(validatorManager = new ValidatorManager(this)));
         loadAndTrack("teleport manager", () -> loadables.add(teleport = new Teleport(this)));
+        loadAndTrack("tournament manager", () -> loadables.add(tournamentManager = new TournamentManager(this)));
 
         if (!load()) {
             getServer().getPluginManager().disablePlugin(this);
@@ -732,8 +759,18 @@ public class DuelsPlugin extends JavaPlugin implements Duels, LogSource {
         new LingerPotionListener(this);
         new DuelEntityScopeListener(this);
         new ArenaIntrusionGuard(this);
+        registerListener(new ArenaBlockListener(this));
+        registerListener(new ArenaExplosionListener(this));
+        registerListener(new ArenaInteractionListener(this));
+        registerListener(new ArenaEntityListener(this));
+        registerListener(new ArenaBoundaryListener(this));
         new KitEditManager(this);
         registerListener(new KitEditListener(this));
+        if (Bukkit.getPluginManager().isPluginEnabled("FancyNpcs")) {
+            final TournamentNpcListener tournamentNpcListener = new TournamentNpcListener(this);
+            registerListener(tournamentNpcListener);
+            tournamentNpcListener.registerFancyNpcHook();
+        }
 
         sendMessage("&dSuccessfully loaded pre-listeners in &f[" + CC.getTimeDifferenceAndColor(start, System.currentTimeMillis()) + "&f]");
     }
@@ -746,13 +783,17 @@ public class DuelsPlugin extends JavaPlugin implements Duels, LogSource {
         }
 
         this.updateManager = new UpdateManager(this);
-        this.updateManager.checkForUpdate();
-        if (updateManager.updateIsAvailable()){
-            sendMessage("&a===============================================");
-            sendMessage("&aAn update for " + getName() + " is available!");
-            sendMessage("&aDownload " + getName() + " v" + updateManager.getLatestVersion() + " here:");
-            sendMessage("&e" + getDescription().getWebsite());
-            sendMessage("&a===============================================");
-        }
+        doAsync(() -> {
+            updateManager.checkForUpdate();
+            if (updateManager.updateIsAvailable()) {
+                doSync(() -> {
+                    sendMessage("&a===============================================");
+                    sendMessage("&aAn update for " + getName() + " is available!");
+                    sendMessage("&aDownload " + getName() + " v" + updateManager.getLatestVersion() + " here:");
+                    sendMessage("&e" + getDescription().getWebsite());
+                    sendMessage("&a===============================================");
+                });
+            }
+        });
     }
 }

@@ -22,3 +22,7 @@ commands:
     name: kit
     aliases: [dkit]
 
+
+  tournament:
+    name: tournament
+    aliases: [tour]

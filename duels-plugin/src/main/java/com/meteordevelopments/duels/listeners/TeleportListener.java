@@ -6,7 +6,6 @@ import com.meteordevelopments.duels.core.arena.ArenaManagerImpl;
 import com.meteordevelopments.duels.config.Lang;
 import com.meteordevelopments.duels.core.spectate.SpectateManagerImpl;
 import com.meteordevelopments.duels.core.teleport.Teleport;
-import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -32,7 +31,7 @@ public class TeleportListener implements Listener {
         this.spectateManager = plugin.getSpectateManager();
 
         if (plugin.getConfiguration().isPreventTpToMatchPlayers()) {
-            Bukkit.getPluginManager().registerEvents(this, plugin);
+            plugin.registerListener(this);
         }
     }
 

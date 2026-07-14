@@ -6,7 +6,6 @@ import com.meteordevelopments.duels.core.arena.ArenaImpl;
 import com.meteordevelopments.duels.core.arena.ArenaManagerImpl;
 import com.meteordevelopments.duels.core.spectate.SpectateManagerImpl;
 import com.meteordevelopments.duels.util.compat.DuelEntities;
-import org.bukkit.Bukkit;
 import org.bukkit.entity.*;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -23,7 +22,7 @@ public class DuelEntityScopeListener implements Listener {
     public DuelEntityScopeListener(DuelsPlugin plugin) {
         this.arenaManager = plugin.getArenaManager();
         this.spectateManager = plugin.getSpectateManager();
-        Bukkit.getPluginManager().registerEvents(this, plugin);
+        plugin.registerListener(this);
     }
 
     private ArenaImpl arenaOf(Player p) {

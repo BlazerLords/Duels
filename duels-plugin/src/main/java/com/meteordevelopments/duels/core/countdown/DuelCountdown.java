@@ -18,6 +18,7 @@ import org.bukkit.entity.Player;
 
 public class DuelCountdown implements Runnable {
 
+    private final DuelsPlugin plugin;
     protected final Config config;
     protected final Lang lang;
     protected final UserManagerImpl userManager;
@@ -33,6 +34,7 @@ public class DuelCountdown implements Runnable {
     private final AtomicReference<WrappedTask> scheduledTask = new AtomicReference<>();
 
     protected DuelCountdown(final DuelsPlugin plugin, final ArenaImpl arena, final DuelMatch match, final List<String> messages, final List<String> titles) {
+        this.plugin = plugin;
         this.config = plugin.getConfiguration();
         this.lang = plugin.getLang();
         this.userManager = plugin.getUserManager();
@@ -89,7 +91,8 @@ public class DuelCountdown implements Runnable {
             // Cancel the FoliaLib task
             WrappedTask task = scheduledTask.get();
             if (task != null) {
-                task.cancel();
+                plugin.cancelTask(task);
+                scheduledTask.compareAndSet(task, null);
             }
 
             return;
@@ -103,13 +106,7 @@ public class DuelCountdown implements Runnable {
     }
 
     public void startCountdown(long delay, long period) {
-        WrappedTask task = DuelsPlugin.getFoliaLib()
-                .getScheduler()
-                .runTimerAsync(
-                        this,
-                        delay,
-                        period
-                );
-        scheduledTask.set(task); // Store the task reference
+        WrappedTask task = plugin.doSyncRepeat(this, delay, period);
+        scheduledTask.set(task);
     }
 }

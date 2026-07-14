@@ -17,7 +17,6 @@ import com.meteordevelopments.duels.config.Config;
 import com.meteordevelopments.duels.config.Lang;
 import com.meteordevelopments.duels.hook.hooks.EssentialsHook;
 import com.meteordevelopments.duels.hook.hooks.MyPetHook;
-import com.meteordevelopments.duels.core.player.PlayerInfo;
 import com.meteordevelopments.duels.core.player.PlayerInfoManager;
 import com.meteordevelopments.duels.core.teleport.Teleport;
 import com.meteordevelopments.duels.util.BlockUtil;
@@ -82,7 +81,14 @@ public class SpectateManagerImpl implements Loadable, SpectateManager {
 
     @Override
     public void handleUnload() {
+        for (SpectatorImpl spectator : new ArrayList<>(spectators.values())) {
+            final Player player = Bukkit.getPlayer(spectator.getUuid());
+            if (player != null) {
+                stopSpectating(player, spectator);
+            }
+        }
         spectators.clear();
+        arenas.clear();
     }
 
     @Nullable
@@ -146,6 +152,15 @@ public class SpectateManagerImpl implements Loadable, SpectateManager {
                     });
         }
 
+        for (final SpectatorImpl existing : getSpectatorsImpl(arena)) {
+            final Player existingPlayer = existing.getPlayer();
+            if (existingPlayer == null || !existingPlayer.isOnline()) {
+                continue;
+            }
+            hidePlayer(existingPlayer, player);
+            hidePlayer(player, existingPlayer);
+        }
+
         // Remove pet before teleport
         if (myPet != null) {
             myPet.removePet(player);
@@ -175,8 +190,8 @@ public class SpectateManagerImpl implements Loadable, SpectateManager {
                 player.addPotionEffect(new PotionEffect(PotionEffectType.INVISIBILITY, Integer.MAX_VALUE, 1, false, false));
             }
 
-            // Broadcast to the arena that player has begun spectating if player does not have the SPEC_ANON permission.
-            if (!player.hasPermission(Permissions.SPEC_ANON)) {
+            // Tournament spectating can hide join messages from fighters while keeping /spec behavior configurable.
+            if (!config.isSpecHideJoinMessageFromFighters() && !player.hasPermission(Permissions.SPEC_ANON)) {
                 arena.getMatch().getAllPlayers().forEach(matchPlayer -> lang.sendMessage(matchPlayer, "SPECTATE.arena-broadcast", "name", player.getName()));
             }
         });
@@ -199,11 +214,8 @@ public class SpectateManagerImpl implements Loadable, SpectateManager {
 
         player.setCollidable(true);
 
-        final PlayerInfo info = playerManager.remove(player);
-
-        if (info != null) {
-            teleport.tryTeleport(player, info.getLocation());
-            info.restore(player);
+        if (playerManager.get(player) != null) {
+            playerManager.restore(player, false, true, false);
         } else {
             teleport.tryTeleport(player, playerManager.getLobby());
         }
@@ -224,8 +236,36 @@ public class SpectateManagerImpl implements Loadable, SpectateManager {
                     });
         }
 
+        for (final SpectatorImpl existing : getSpectatorsImpl(spectator.getArena())) {
+            final Player existingPlayer = existing.getPlayer();
+            if (existingPlayer == null || !existingPlayer.isOnline()) {
+                continue;
+            }
+            showPlayer(existingPlayer, player);
+            showPlayer(player, existingPlayer);
+        }
+
         final SpectateEndEvent event = new SpectateEndEvent(player, spectator);
         Bukkit.getPluginManager().callEvent(event);
+    }
+
+    private void hidePlayer(final Player viewer, final Player hidden) {
+        if (!viewer.canSee(hidden)) {
+            return;
+        }
+        if (CompatUtil.hasHidePlayer()) {
+            viewer.hidePlayer(plugin, hidden);
+        } else {
+            viewer.hidePlayer(hidden);
+        }
+    }
+
+    private void showPlayer(final Player viewer, final Player hidden) {
+        if (CompatUtil.hasHidePlayer()) {
+            viewer.showPlayer(plugin, hidden);
+        } else {
+            viewer.showPlayer(hidden);
+        }
     }
 
     /**
@@ -255,7 +295,7 @@ public class SpectateManagerImpl implements Loadable, SpectateManager {
             final Player player = Bukkit.getPlayer(spectator.getUuid());
 
             if (player == null) {
-                // Spectator went offline before match ended — clean up dangling UUID entry
+                // Spectator went offline before match ended; clean up dangling UUID entry
                 SpectateManagerImpl.this.spectators.remove(spectator.getUuid());
                 return;
             }
@@ -308,7 +348,7 @@ public class SpectateManagerImpl implements Loadable, SpectateManager {
 
             final String command = event.getMessage().substring(1).split(" ")[0].toLowerCase();
 
-            if (command.equalsIgnoreCase("spectate") || command.equalsIgnoreCase("spec") || config.getSpecWhitelistedCommands().contains(command)) {
+            if (command.equalsIgnoreCase("spectate") || command.equalsIgnoreCase("spec") || command.equalsIgnoreCase("tournament") || command.equalsIgnoreCase("tour") || config.getSpecWhitelistedCommands().contains(command)) {
                 return;
             }
 

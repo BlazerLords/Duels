@@ -34,7 +34,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Manages:
@@ -57,7 +59,8 @@ public class PlayerInfoManager implements Loadable {
     private final File lobbyFile;
     private final File kitlobbyFile;
 
-    private final Map<UUID, PlayerInfo> cache = new HashMap<>();
+    private final Map<UUID, PlayerInfo> cache = new ConcurrentHashMap<>();
+    private final Set<UUID> restoring = ConcurrentHashMap.newKeySet();
 
     private Teleport teleport;
     private EssentialsHook essentials;
@@ -138,13 +141,9 @@ public class PlayerInfoManager implements Loadable {
     @Override
     public void handleUnload() throws IOException {
         Bukkit.getOnlinePlayers().stream().filter(Player::isDead).forEach(player -> {
-            final PlayerInfo info = remove(player);
-
-            if (info != null) {
+            if (get(player) != null) {
                 player.spigot().respawn();
-                teleport.tryTeleport(player, info.getLocation());
-                PlayerUtil.reset(player);
-                info.restore(player);
+                restore(player, true, true, false);
             }
         });
 
@@ -164,6 +163,7 @@ public class PlayerInfoManager implements Loadable {
         }
 
         cache.clear();
+        restoring.clear();
     }
 
     /**
@@ -244,6 +244,29 @@ public class PlayerInfoManager implements Loadable {
     }
 
     /**
+     * Creates a recovery snapshot only when the player does not already have one.
+     * This prevents a second match preparation from overwriting the player's original state.
+     *
+     * @param player player whose current state should be cached
+     * @param excludeInventory whether inventory contents should be excluded
+     * @param restoreExperience whether experience and level should be restored
+     * @return true when a new snapshot was stored
+     */
+    public boolean createIfAbsent(final Player player, final boolean excludeInventory,
+                                  final boolean restoreExperience) {
+        final UUID uuid = player.getUniqueId();
+        if (cache.containsKey(uuid)) {
+            return false;
+        }
+
+        final PlayerInfo info = new PlayerInfo(player, excludeInventory, restoreExperience);
+        if (!config.isTeleportToLastLocation()) {
+            info.setLocation(lobby.clone());
+        }
+        return cache.putIfAbsent(uuid, info) == null;
+    }
+
+    /**
      * Calls {@link #create(Player, boolean)} with excludeInventory defaulting to false.
      *
      * @see {@link #create(Player, boolean)}
@@ -262,6 +285,46 @@ public class PlayerInfoManager implements Loadable {
         return cache.remove(player.getUniqueId());
     }
 
+    /**
+     * Restores a cached player snapshot and removes it only after every requested operation succeeds.
+     * Concurrent or repeated restore attempts for the same player are ignored.
+     *
+     * @param player player whose snapshot should be restored
+     * @param resetPlayer whether to reset temporary match state before applying the snapshot
+     * @param teleportPlayer whether to teleport to the snapshot location
+     * @param preserveExperience whether to keep the player's current experience and level
+     * @return true when the snapshot was restored and removed, false when unavailable, already restoring, or failed
+     */
+    public boolean restore(final Player player, final boolean resetPlayer, final boolean teleportPlayer,
+                           final boolean preserveExperience) {
+        final UUID uuid = player.getUniqueId();
+        final PlayerInfo info = cache.get(uuid);
+        if (info == null || !restoring.add(uuid)) {
+            return false;
+        }
+
+        try {
+            if (resetPlayer) {
+                PlayerUtil.reset(player);
+            }
+            if (teleportPlayer) {
+                teleport.tryTeleport(player, info.getLocation());
+            }
+            if (preserveExperience) {
+                info.restoreWithoutExperience(player);
+            } else {
+                info.restore(player);
+            }
+            return cache.remove(uuid, info);
+        } catch (RuntimeException ex) {
+            Log.error(this, "Could not restore player state for " + player.getName()
+                    + " (" + uuid + "). The recovery snapshot was retained.", ex);
+            return false;
+        } finally {
+            restoring.remove(uuid);
+        }
+    }
+
     private class PlayerInfoListener implements Listener {
 
         // Handles case of some players causing respawn to skip somehow.
@@ -273,14 +336,7 @@ public class PlayerInfoManager implements Loadable {
                 return;
             }
 
-            final PlayerInfo info = remove(player);
-
-            if (info == null) {
-                return;
-            }
-
-            teleport.tryTeleport(player, info.getLocation());
-            info.restore(player);
+            restore(player, false, true, false);
         }
 
         @EventHandler(priority = EventPriority.HIGHEST)
@@ -333,8 +389,8 @@ public class PlayerInfoManager implements Loadable {
                     }
                 }
 
-                remove(player);
-                DuelsPlugin.getFoliaLib().getScheduler().runAtEntity(player, task -> info.restore(player));
+                DuelsPlugin.getFoliaLib().getScheduler().runAtEntity(player,
+                        task -> restore(player, false, false, false));
             }, 1L);
         }
     }
