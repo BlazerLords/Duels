@@ -10,6 +10,7 @@ import com.meteordevelopments.duels.core.arena.ArenaImpl;
 import com.meteordevelopments.duels.core.kit.KitImpl;
 import com.meteordevelopments.duels.core.match.DuelMatch;
 import com.meteordevelopments.duels.core.player.PlayerInfo;
+import com.meteordevelopments.duels.hook.hooks.VaultHook;
 import com.meteordevelopments.duels.data.LocationData;
 import com.meteordevelopments.duels.setting.Settings;
 import com.meteordevelopments.duels.util.Loadable;
@@ -24,8 +25,10 @@ import net.md_5.bungee.api.chat.TextComponent;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.NamespacedKey;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.Sound;
+import org.bukkit.Statistic;
 import org.bukkit.boss.BarColor;
 import org.bukkit.boss.BarStyle;
 import org.bukkit.boss.BossBar;
@@ -43,8 +46,12 @@ import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.entity.PlayerDeathEvent;
+import net.milkbowl.vault.economy.Economy;
+import net.milkbowl.vault.economy.EconomyResponse;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -57,6 +64,8 @@ import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.security.SecureRandom;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -66,6 +75,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -88,6 +98,7 @@ public class TournamentManager implements Loadable, Listener {
     private final File dataFile;
     private final File configFile;
     private final File lobbyFile;
+    private final NamespacedKey rewardDeliveryKey;
     private TournamentSettings settings;
     private Location lobby;
     private WrappedTask autoForfeitTask;
@@ -98,17 +109,19 @@ public class TournamentManager implements Loadable, Listener {
         this.dataFile = new File(plugin.getDataFolder(), "tournaments.yml");
         this.configFile = new File(plugin.getDataFolder(), "config.yml");
         this.lobbyFile = new File(plugin.getDataFolder(), "tournament-lobby.json");
+        this.rewardDeliveryKey = new NamespacedKey(plugin, "tournament_reward_delivery");
         Bukkit.getPluginManager().registerEvents(this, plugin);
     }
 
     @Override
     public void handleLoad() {
-        dataWriter = new LatestSnapshotWriter<>(plugin::doAsync, this::writeData,
-                ex -> plugin.getLogger().warning("Could not save tournaments.yml: " + ex.getMessage()));
+        dataWriter = createDataWriter();
         settings = TournamentSettings.load(YamlConfiguration.loadConfiguration(configFile));
         loadLobby();
         loadData();
+        logInterruptedMoneyRewards();
         tournaments.values().forEach(this::refreshHologramAfterLoad);
+        plugin.doSyncAfter(() -> tournaments.values().forEach(tournament -> tryDeliverRewards(tournament, null)), 20L);
         autoForfeitTask = plugin.doSyncRepeat(this::checkAutoForfeits, 20L, 20L * 30L);
     }
 
@@ -119,6 +132,9 @@ public class TournamentManager implements Loadable, Listener {
         }
         autoForfeitTask = null;
         new ArrayList<>(pendingKitSelections.values()).forEach(this::cleanupKitSelection);
+        // CMI holograms are persistent and are refreshed on the next enable. Calling
+        // CMI's save/remove API while the server is disabling can block the main
+        // thread and prevent duel inventories from reaching their recovery phase.
         saveDataNow();
         dataWriter = null;
         tournaments.clear();
@@ -333,6 +349,11 @@ public class TournamentManager implements Loadable, Listener {
         if (removed == null) {
             return false;
         }
+        if (removed.getRewardDeliveries().values().stream()
+                .anyMatch(delivery -> delivery.getStatus() != TournamentRewardStatus.PAID)) {
+            plugin.getLogger().warning("Tournament deletion blocked because rewards are still pending: " + removed.getName());
+            return false;
+        }
 
         cleanupPendingSelections(removed, ignored -> true);
         terminateActiveMatches(removed, ignored -> true);
@@ -362,15 +383,48 @@ public class TournamentManager implements Loadable, Listener {
 
     public boolean removePlayer(final String name, final String player) {
         final Tournament tournament = getTournament(name);
-        if (tournament == null || tournament.getStatus() != TournamentStatus.CREATED) {
+        if (tournament == null || tournament.getStatus() == TournamentStatus.FINISHED
+                || tournament.getStatus() == TournamentStatus.CANCELLED) {
             return false;
         }
 
         final boolean removed = tournament.getPlayers().removeIf(value -> value.equalsIgnoreCase(player));
-        if (removed) {
-            changed(tournament);
+        if (!removed) {
+            return false;
         }
-        return removed;
+        if (tournament.getStatus() == TournamentStatus.CREATED) {
+            changed(tournament);
+            return true;
+        }
+
+        if (tournament.getEliminatedPlayers().stream().noneMatch(value -> value.equalsIgnoreCase(player))) {
+            tournament.getEliminatedPlayers().add(player);
+        }
+        cleanupPendingSelections(tournament, selection -> selection.hasPlayer(player));
+
+        final TournamentMatch current = findPlayerCurrentMatch(tournament, player);
+        if (current != null && !current.getStatus().isTerminal()) {
+            final String opponent = current.getOpponent(player);
+            if (opponent != null && !"BYE".equalsIgnoreCase(opponent)) {
+                finishMatch(tournament, current, opponent);
+            } else {
+                current.setStatus(TournamentMatchStatus.CANCELLED);
+                current.setWaitingSince(0L);
+            }
+            terminateActiveMatches(tournament, active -> active.round == current.getRound()
+                    && active.match == current.getNumber());
+        }
+
+        final Player online = Bukkit.getPlayerExact(player);
+        if (online != null) {
+            if (plugin.getSpectateManager().isSpectating(online)) {
+                plugin.getSpectateManager().stopSpectating(online);
+            }
+            teleportToTournamentLobby(online);
+            online.sendMessage(StringUtil.color("&cВы исключены из турнира &e" + tournament.getName() + "&c."));
+        }
+        changed(tournament);
+        return true;
     }
 
     public AddResult joinPlayer(final String name, final Player player) {
@@ -390,7 +444,259 @@ public class TournamentManager implements Loadable, Listener {
             return AddResult.ALREADY_IN_OTHER_TOURNAMENT;
         }
 
+        if (tournament.isPlaytimeRequirementEnabled()
+                && getPlaytimeHours(player) < tournament.getRequiredPlaytimeHours()) {
+            return AddResult.NOT_ENOUGH_PLAYTIME;
+        }
+
+        if (tournament.isEntryFeeEnabled() && tournament.getEntryFeeAmount() > 0D) {
+            final TournamentPaymentRecord payment = new TournamentPaymentRecord(UUID.randomUUID(), player.getUniqueId(),
+                    player.getName(), tournament.getId(), BigDecimal.valueOf(tournament.getEntryFeeAmount()),
+                    System.currentTimeMillis(), TournamentPaymentStatus.PENDING, false);
+            tournament.getPaymentRecords().put(payment.getPaymentId(), payment);
+            saveCriticalData();
+            final EntryFeeWithdrawResult withdrawResult = withdrawEntryFee(player, tournament);
+            if (withdrawResult != EntryFeeWithdrawResult.SUCCESS) {
+                payment.setStatus(TournamentPaymentStatus.FAILED);
+                saveCriticalData();
+                return switch (withdrawResult) {
+                    case NOT_ENOUGH_MONEY -> AddResult.NOT_ENOUGH_MONEY;
+                    case ECONOMY_UNAVAILABLE -> AddResult.ECONOMY_UNAVAILABLE;
+                    case WITHDRAW_FAILED -> AddResult.ECONOMY_WITHDRAW_FAILED;
+                    case SUCCESS -> AddResult.SUCCESS;
+                };
+            }
+            payment.setStatus(TournamentPaymentStatus.SUCCESS);
+            if (tournament.isRewardsEnabled() && tournament.getRewardType() == TournamentRewardType.ENTRY_FEE_POOL) {
+                accountPayment(tournament, payment);
+            }
+            saveCriticalData();
+        }
+
         return addPlayer(name, player.getName());
+    }
+
+    private void accountSuccessfulPayments(final Tournament tournament) {
+        tournament.getPaymentRecords().values().stream()
+                .filter(record -> record.getStatus() == TournamentPaymentStatus.SUCCESS)
+                .forEach(record -> accountPayment(tournament, record));
+    }
+
+    private void accountPayment(final Tournament tournament, final TournamentPaymentRecord payment) {
+        if (payment.isAddedToFund()) {
+            plugin.getLogger().warning("Duplicate tournament payment accounting ignored: tournament="
+                    + tournament.getName() + ", payment=" + payment.getPaymentId());
+            return;
+        }
+        final BigDecimal amount = TournamentRewardCalculator.nonNegative(payment.getAmount());
+        tournament.setRewardFund(TournamentRewardCalculator.nonNegative(tournament.getRewardFund()).add(amount));
+        payment.setAddedToFund(true);
+        plugin.getLogger().info("Tournament entry fee added to reward fund: tournament=" + tournament.getName()
+                + ", payment=" + payment.getPaymentId() + ", player=" + payment.getPlayerName()
+                + ", amount=" + amount.toPlainString() + ", fund=" + tournament.getRewardFund().toPlainString());
+    }
+
+    public int getPlaytimeHours(final Player player) {
+        if (player == null) {
+            return 0;
+        }
+        return Math.max(0, player.getStatistic(Statistic.PLAY_ONE_MINUTE) / 20 / 60 / 60);
+    }
+
+    public boolean setPlaytimeRequirementEnabled(final String name, final boolean enabled) {
+        final Tournament tournament = getTournament(name);
+        if (tournament == null) {
+            return false;
+        }
+        tournament.setPlaytimeRequirementEnabled(enabled);
+        changed(tournament);
+        return true;
+    }
+
+    public boolean setRequiredPlaytimeHours(final String name, final int hours) {
+        final Tournament tournament = getTournament(name);
+        if (tournament == null) {
+            return false;
+        }
+        tournament.setRequiredPlaytimeHours(Math.max(0, hours));
+        changed(tournament);
+        return true;
+    }
+
+    public boolean setEntryFeeEnabled(final String name, final boolean enabled) {
+        final Tournament tournament = getTournament(name);
+        if (tournament == null) {
+            return false;
+        }
+        tournament.setEntryFeeEnabled(enabled);
+        changed(tournament);
+        return true;
+    }
+
+    public boolean setEntryFeeAmount(final String name, final double amount) {
+        final Tournament tournament = getTournament(name);
+        if (tournament == null || !Double.isFinite(amount) || amount < 0D) {
+            return false;
+        }
+        tournament.setEntryFeeAmount(amount);
+        changed(tournament);
+        return true;
+    }
+
+    public boolean setRewardsEnabled(final String name, final boolean enabled) {
+        final Tournament tournament = getTournament(name);
+        if (tournament == null || tournament.getStatus() != TournamentStatus.CREATED) return false;
+        tournament.setRewardsEnabled(enabled);
+        if (enabled && tournament.getRewardType() == TournamentRewardType.ENTRY_FEE_POOL) {
+            accountSuccessfulPayments(tournament);
+        }
+        plugin.getLogger().info("Tournament rewards " + (enabled ? "enabled" : "disabled")
+                + ": tournament=" + tournament.getName());
+        changed(tournament);
+        return true;
+    }
+
+    public boolean setRewardType(final String name, final TournamentRewardType type) {
+        final Tournament tournament = getTournament(name);
+        if (tournament == null || type == null || tournament.getStatus() != TournamentStatus.CREATED) return false;
+        tournament.setRewardType(type);
+        if (type == TournamentRewardType.ENTRY_FEE_POOL && tournament.isRewardsEnabled()) accountSuccessfulPayments(tournament);
+        plugin.getLogger().info("Tournament reward type changed: tournament=" + tournament.getName() + ", type=" + type);
+        changed(tournament);
+        return true;
+    }
+
+    public boolean setFixedReward(final String name, final int place, final BigDecimal amount) {
+        final Tournament tournament = getTournament(name);
+        if (tournament == null || tournament.getStatus() != TournamentStatus.CREATED || place < 1 || place > 3
+                || amount == null || amount.signum() < 0 || amount.compareTo(BigDecimal.valueOf(Double.MAX_VALUE)) > 0) return false;
+        final BigDecimal normalized = amount.setScale(2, RoundingMode.DOWN);
+        if (place == 1) tournament.setFixedFirstReward(normalized);
+        else if (place == 2) tournament.setFixedSecondReward(normalized);
+        else tournament.setFixedThirdReward(normalized);
+        plugin.getLogger().info("Tournament fixed reward changed: tournament=" + tournament.getName()
+                + ", place=" + place + ", amount=" + normalized.toPlainString());
+        changed(tournament);
+        return true;
+    }
+
+    public boolean setRewardPercentages(final String name, final int first, final int second, final int third) {
+        final Tournament tournament = getTournament(name);
+        if (tournament == null || tournament.getStatus() != TournamentStatus.CREATED
+                || first < 0 || second < 0 || third < 0 || first + second + third != 100) return false;
+        tournament.setFirstRewardPercent(first);
+        tournament.setSecondRewardPercent(second);
+        tournament.setThirdRewardPercent(third);
+        plugin.getLogger().info("Tournament reward percentages changed: tournament=" + tournament.getName()
+                + ", distribution=" + first + "/" + second + "/" + third);
+        changed(tournament);
+        return true;
+    }
+
+    public boolean setItemRewards(final String name, final int place, final List<ItemStack> items) {
+        final Tournament tournament = getTournament(name);
+        if (tournament == null || tournament.isRewardsFinalized() || place < 1 || place > 3) return false;
+        final List<ItemStack> copies = items == null ? new ArrayList<>() : items.stream()
+                .filter(Objects::nonNull).filter(item -> item.getType() != Material.AIR)
+                .map(ItemStack::clone).collect(Collectors.toCollection(ArrayList::new));
+        tournament.getItemRewards().put(place, copies);
+        plugin.getLogger().info("Tournament item reward changed: tournament=" + tournament.getName()
+                + ", place=" + place + ", stacks=" + copies.size());
+        changed(tournament);
+        return true;
+    }
+
+    public BigDecimal getFixedRewardTotal(final Tournament tournament) {
+        return TournamentRewardCalculator.total(List.of(tournament.getFixedFirstReward(),
+                tournament.getFixedSecondReward(), tournament.getFixedThirdReward()));
+    }
+
+    private Economy getEconomy() {
+        final VaultHook vault = plugin.getHookManager() == null ? null : plugin.getHookManager().getHook(VaultHook.class);
+        return vault == null ? null : vault.getEconomy();
+    }
+
+    private EntryFeeWithdrawResult withdrawEntryFee(final Player player, final Tournament tournament) {
+        if (Bukkit.getPluginManager().isPluginEnabled("CMI")) {
+            return withdrawEntryFeeViaCmi(player, tournament);
+        }
+        return withdrawEntryFeeViaVault(player, tournament);
+    }
+
+    private EntryFeeWithdrawResult withdrawEntryFeeViaCmi(final Player player, final Tournament tournament) {
+        final double amount = tournament.getEntryFeeAmount();
+        try {
+            final Class<?> cmiUserClass = Class.forName("com.Zrips.CMI.Containers.CMIUser");
+            final Object cmiUser = cmiUserClass.getMethod("getUser", Player.class).invoke(null, player);
+            if (cmiUser == null) {
+                plugin.getLogger().warning("CMI entry fee withdraw failed: CMIUser is null for player=" + player.getName()
+                        + ", tournament=" + tournament.getName());
+                return EntryFeeWithdrawResult.WITHDRAW_FAILED;
+            }
+
+            final double balanceBefore = ((Number) cmiUserClass.getMethod("getBalance").invoke(cmiUser)).doubleValue();
+            if (balanceBefore + 0.000001D < amount) {
+                plugin.getLogger().info("CMI entry fee rejected: not enough money for player=" + player.getName()
+                        + ", tournament=" + tournament.getName()
+                        + ", amount=" + amount
+                        + ", balance=" + balanceBefore);
+                return EntryFeeWithdrawResult.NOT_ENOUGH_MONEY;
+            }
+
+            cmiUserClass.getMethod("withdraw", Double.class).invoke(cmiUser, amount);
+            final double balanceAfter = ((Number) cmiUserClass.getMethod("getBalance").invoke(cmiUser)).doubleValue();
+            if (balanceAfter > balanceBefore - amount + 0.000001D) {
+                plugin.getLogger().warning("CMI entry fee withdraw did not change balance as expected for player=" + player.getName()
+                        + ", tournament=" + tournament.getName()
+                        + ", amount=" + amount
+                        + ", balanceBefore=" + balanceBefore
+                        + ", balanceAfter=" + balanceAfter);
+                return EntryFeeWithdrawResult.WITHDRAW_FAILED;
+            }
+
+            try {
+                cmiUserClass.getMethod("addForDelayedSave").invoke(cmiUser);
+            } catch (final ReflectiveOperationException ignored) {
+                // Older CMI versions can save economy changes internally without this helper.
+            }
+
+            plugin.getLogger().info("CMI tournament entry fee withdrawn for player=" + player.getName()
+                    + ", tournament=" + tournament.getName()
+                    + ", amount=" + amount
+                    + ", balanceBefore=" + balanceBefore
+                    + ", balanceAfter=" + balanceAfter);
+            return EntryFeeWithdrawResult.SUCCESS;
+        } catch (final ReflectiveOperationException | LinkageError | ClassCastException ex) {
+            plugin.getLogger().warning("CMI entry fee withdraw failed for player=" + player.getName()
+                    + ", tournament=" + tournament.getName()
+                    + ", amount=" + amount
+                    + ": " + ex.getMessage());
+            return EntryFeeWithdrawResult.WITHDRAW_FAILED;
+        }
+    }
+
+    private EntryFeeWithdrawResult withdrawEntryFeeViaVault(final Player player, final Tournament tournament) {
+        final Economy economy = getEconomy();
+        if (economy == null) {
+            return EntryFeeWithdrawResult.ECONOMY_UNAVAILABLE;
+        }
+        if (!economy.has((OfflinePlayer) player, tournament.getEntryFeeAmount())) {
+            return EntryFeeWithdrawResult.NOT_ENOUGH_MONEY;
+        }
+        final EconomyResponse response = economy.withdrawPlayer((OfflinePlayer) player, tournament.getEntryFeeAmount());
+        if (response == null || !response.transactionSuccess()) {
+            plugin.getLogger().warning("Vault tournament entry fee withdraw failed for player=" + player.getName()
+                    + ", tournament=" + tournament.getName()
+                    + ", amount=" + tournament.getEntryFeeAmount()
+                    + ", responseType=" + (response != null ? response.type : "null")
+                    + ", error=" + (response != null ? response.errorMessage : "no response"));
+            return EntryFeeWithdrawResult.WITHDRAW_FAILED;
+        }
+        plugin.getLogger().info("Vault tournament entry fee withdrawn for player=" + player.getName()
+                + ", tournament=" + tournament.getName()
+                + ", amount=" + tournament.getEntryFeeAmount()
+                + ", balanceAfter=" + economy.getBalance((OfflinePlayer) player));
+        return EntryFeeWithdrawResult.SUCCESS;
     }
 
     public RemoveResult leavePlayer(final String name, final Player player) {
@@ -456,7 +762,7 @@ public class TournamentManager implements Loadable, Listener {
 
     public boolean reset(final String name) {
         final Tournament tournament = getTournament(name);
-        if (tournament == null) {
+        if (tournament == null || hasPendingRewards(tournament)) {
             return false;
         }
 
@@ -467,10 +773,56 @@ public class TournamentManager implements Loadable, Listener {
         tournament.setCurrentRound(1);
         tournament.setHologramRound(1);
         tournament.setHologramPage(1);
+        tournament.getPlayers().clear();
         tournament.getEliminatedPlayers().clear();
         tournament.getMatches().clear();
+        tournament.setId(UUID.randomUUID());
+        tournament.setRewardsFinalized(false);
+        tournament.setRewardFund(BigDecimal.ZERO);
+        tournament.getPaymentRecords().clear();
+        tournament.getRewardDeliveries().clear();
+        plugin.getLogger().info("Tournament reset started a new registration and reward cycle: tournament="
+                + tournament.getName());
         changed(tournament);
         return true;
+    }
+
+    public boolean hasPendingRewards(final Tournament tournament) {
+        return tournament != null && tournament.getRewardDeliveries().values().stream()
+                .anyMatch(delivery -> delivery.getStatus() != TournamentRewardStatus.PAID);
+    }
+
+    public RewardRetryResult retryItemReward(final String name, final int place) {
+        final Tournament tournament = getTournament(name);
+        if (tournament == null) {
+            return RewardRetryResult.NOT_FOUND;
+        }
+        if (!tournament.isRewardsFinalized() || tournament.getRewardType() != TournamentRewardType.ITEMS
+                || place < 1 || place > 3) {
+            return RewardRetryResult.NOT_READY;
+        }
+        final TournamentRewardDelivery previous = tournament.getRewardDeliveries().get(place);
+        if (previous == null || previous.getWinnerId() == null || previous.getWinnerName() == null) {
+            return RewardRetryResult.NO_WINNER;
+        }
+        if (previous.getStatus() != TournamentRewardStatus.PAID) {
+            return RewardRetryResult.ALREADY_PENDING;
+        }
+        if (tournament.getItemRewards().getOrDefault(place, List.of()).isEmpty()) {
+            return RewardRetryResult.NO_REWARD;
+        }
+
+        final TournamentRewardDelivery replacement = new TournamentRewardDelivery(place);
+        replacement.setWinnerId(previous.getWinnerId());
+        replacement.setWinnerName(previous.getWinnerName());
+        replacement.setAmount(BigDecimal.ZERO);
+        copyConfiguredRewardItems(tournament, place, replacement);
+        tournament.getRewardDeliveries().put(place, replacement);
+        plugin.getLogger().warning("Tournament item reward manually re-queued: tournament=" + tournament.getName()
+                + ", place=" + place + ", player=" + replacement.getWinnerName());
+        saveCriticalData();
+        scheduleRewardDelivery(tournament);
+        return RewardRetryResult.SUCCESS;
     }
 
     public boolean finishTournament(final String name) {
@@ -488,9 +840,11 @@ public class TournamentManager implements Loadable, Listener {
                 .forEach(match -> match.setStatus(TournamentMatchStatus.CANCELLED)));
         cleanupPendingSelections(tournament, ignored -> true);
         terminateActiveMatches(tournament, ignored -> true);
+        finalizeRewards(tournament);
         changed(tournament);
         releaseTournamentArena(tournament);
         sendFinalResults(tournament);
+        scheduleRewardDelivery(tournament);
         return true;
     }
 
@@ -499,25 +853,66 @@ public class TournamentManager implements Loadable, Listener {
         if (tournament == null) {
             return ReplayResult.NOT_FOUND;
         }
+        if (tournament.isRewardsFinalized()) return ReplayResult.NOT_READY;
         final TournamentMatch target = tournament.getMatch(round, matchNumber);
         if (target == null) {
             return ReplayResult.NO_MATCH;
         }
-        if (!target.isKnown() || target.isBye()) {
+        if (!target.isKnown() || target.isBye()
+                || target.getStatus() != TournamentMatchStatus.FINISHED || target.getWinner() == null) {
             return ReplayResult.NOT_READY;
         }
 
+        return replayMatch(tournament, target);
+    }
+
+    public ReplayResult replayLatestMatch(final String name) {
+        final Tournament tournament = getTournament(name);
+        if (tournament == null) {
+            return ReplayResult.NOT_FOUND;
+        }
+        if (tournament.isRewardsFinalized()) return ReplayResult.NOT_READY;
+        final TournamentMatch target = tournament.getMatches().values().stream()
+                .flatMap(round -> round.values().stream())
+                .filter(match -> match.getStatus() == TournamentMatchStatus.FINISHED)
+                .filter(match -> match.getWinner() != null && match.isKnown() && !match.isBye())
+                .max(Comparator.comparingLong(TournamentMatch::getCompletedAt)
+                        .thenComparingInt(TournamentMatch::getRound)
+                        .thenComparingInt(TournamentMatch::getNumber))
+                .orElse(null);
+        return target == null ? ReplayResult.NO_MATCH : replayMatch(tournament, target);
+    }
+
+    private ReplayResult replayMatch(final Tournament tournament, final TournamentMatch target) {
+        final int round = target.getRound();
         cleanupPendingSelections(tournament, selection -> selection.round >= round);
         terminateActiveMatches(tournament, active -> active.round >= round);
         target.setWinner(null);
+        target.setSelectedKit(null);
+        target.setCompletedAt(0L);
         target.setStatus(TournamentMatchStatus.READY);
         target.setWaitingSince(0L);
-        tournament.getEliminatedPlayers().removeIf(player -> target.hasPlayer(player));
         rebuildFutureRounds(tournament, round);
+        rebuildEliminatedPlayers(tournament);
         tournament.setStatus(TournamentStatus.IN_PROGRESS);
         tournament.setCurrentRound(resolveCurrentRound(tournament));
         changed(tournament);
         return ReplayResult.SUCCESS;
+    }
+
+    private void rebuildEliminatedPlayers(final Tournament tournament) {
+        tournament.getEliminatedPlayers().clear();
+        tournament.getMatches().values().stream()
+                .flatMap(matches -> matches.values().stream())
+                .filter(match -> match.getStatus() == TournamentMatchStatus.FINISHED)
+                .forEach(match -> {
+                    if (match.getWinner() == null) {
+                        addEliminated(tournament, match.getPlayer1());
+                        addEliminated(tournament, match.getPlayer2());
+                    } else {
+                        addEliminated(tournament, match.getOpponent(match.getWinner()));
+                    }
+                });
     }
 
     public MatchStartResult startMatch(final String name, final int round, final int matchNumber) {
@@ -564,14 +959,25 @@ public class TournamentManager implements Loadable, Listener {
             return player1 == null && player2 == null ? MatchStartResult.BOTH_OFFLINE : MatchStartResult.PLAYER_OFFLINE;
         }
 
+        if (preparePlayersForTournamentMatch(player1, player2)) {
+            plugin.doSyncAfter(() -> startMatch(tournament.getName(), round, matchNumber, resumeImmediately), 10L);
+            return MatchStartResult.STARTING;
+        }
+
         final List<String> kitPool = getTournamentKitPool(tournament);
         if (kitPool.isEmpty()) {
             return MatchStartResult.NO_KIT;
         }
 
         final String directKit = resolveDirectMatchKit(tournament, kitPool);
-        final ArenaImpl arena = getArenaForTournament(tournament, plugin.getKitManager().get(directKit));
-        if (hasTournamentArenaLimit(tournament) && arena == null) {
+        final KitImpl directKitImpl = plugin.getKitManager().get(directKit);
+        if (waitForTournamentArena(tournament, directKitImpl)) {
+            plugin.doSyncAfter(() -> startMatch(tournament.getName(), round, matchNumber, resumeImmediately), 10L);
+            return MatchStartResult.STARTING;
+        }
+        final boolean needsArenaBeforeKitSelection = tournament.getKitMode() != TournamentKitMode.PLAYER_CHOICE || kitPool.size() <= 1;
+        final ArenaImpl arena = needsArenaBeforeKitSelection ? getArenaForTournament(tournament, directKitImpl) : null;
+        if (needsArenaBeforeKitSelection && hasTournamentArenaLimit(tournament) && arena == null) {
             return MatchStartResult.NO_ARENA;
         }
         match.setStatus(TournamentMatchStatus.STARTING);
@@ -639,9 +1045,10 @@ public class TournamentManager implements Loadable, Listener {
             changed(tournament);
             return;
         }
+        match.setSelectedKit(kit.getName());
 
-        if (preparePlayersForTournamentMatch(player1, player2)) {
-            plugin.doSyncAfter(() -> launchStartingMatch(tournament.getName(), round, matchNumber, selectedKitName), 5L);
+        if (waitForTournamentArena(tournament, kit)) {
+            plugin.doSyncAfter(() -> launchStartingMatch(tournament.getName(), round, matchNumber, selectedKitName), 10L);
             return;
         }
 
@@ -652,6 +1059,10 @@ public class TournamentManager implements Loadable, Listener {
         if (hasTournamentArenaLimit(tournament) && arena == null) {
             match.setStatus(TournamentMatchStatus.READY);
             changed(tournament);
+            for (Player player : List.of(player1, player2)) {
+                player.sendMessage(StringUtil.color("&cНет свободной разрешённой арены для турнирного кита &f" + kit.getName() + "&c."));
+                describeArenaAvailability(tournament.getName()).forEach(line -> player.sendMessage(StringUtil.color(line)));
+            }
             return;
         }
         if (arena != null) {
@@ -772,15 +1183,14 @@ public class TournamentManager implements Loadable, Listener {
                     ? SpectateResult.FINISHED
                     : SpectateResult.NOT_STARTED;
         }
-        if (!admin && !settings.allowActiveParticipantsToSpectate && tournament.hasParticipant(spectator.getName()) && !tournament.isEliminated(spectator.getName())) {
-            return SpectateResult.ACTIVE_PARTICIPANT;
-        }
-
         final Player target = Bukkit.getPlayerExact(match.getPlayer1());
         if (target == null) {
             return SpectateResult.NO_TARGET;
         }
 
+        if (plugin.getSpectateManager().isSpectating(spectator)) {
+            plugin.getSpectateManager().stopSpectating(spectator);
+        }
         return switch (plugin.getSpectateManager().startSpectating(spectator, target)) {
             case SUCCESS -> {
                 setSpectatorReturnLobby(spectator);
@@ -796,14 +1206,16 @@ public class TournamentManager implements Loadable, Listener {
         if (tournament == null) {
             return SpectateResult.NOT_FOUND;
         }
-        if (!admin && !settings.allowActiveParticipantsToSpectate && tournament.hasParticipant(spectator.getName()) && !tournament.isEliminated(spectator.getName())) {
-            return SpectateResult.ACTIVE_PARTICIPANT;
-        }
-
-        final TournamentMatch match = activeMatches(tournament).stream()
+        final List<TournamentMatch> running = activeMatches(tournament).stream()
                 .filter(active -> active.getStatus() == TournamentMatchStatus.IN_PROGRESS)
-                .findFirst()
-                .orElse(null);
+                .sorted(Comparator.comparingInt(TournamentMatch::getRound)
+                        .thenComparingInt(TournamentMatch::getNumber))
+                .toList();
+        if (running.size() > 1) {
+            openSpectateSelectionMenu(spectator, tournament, running, admin);
+            return SpectateResult.MENU_OPENED;
+        }
+        final TournamentMatch match = running.stream().findFirst().orElse(null);
         if (match == null) {
             return SpectateResult.NOT_STARTED;
         }
@@ -821,6 +1233,48 @@ public class TournamentManager implements Loadable, Listener {
             case TARGET_NOT_IN_MATCH -> SpectateResult.NOT_STARTED;
             default -> SpectateResult.REJECTED;
         };
+    }
+
+    @EventHandler
+    public void onSpectateSelectionClick(final InventoryClickEvent event) {
+        if (!(event.getWhoClicked() instanceof Player player)
+                || !(event.getInventory().getHolder() instanceof SpectateSelectionMenu menu)) {
+            return;
+        }
+        event.setCancelled(true);
+        final MatchReference reference = menu.matches().get(event.getRawSlot());
+        if (reference == null) {
+            return;
+        }
+        player.closeInventory();
+        final SpectateResult result = spectate(player, menu.tournament(), reference.round(), reference.match(), menu.admin());
+        if (result != SpectateResult.SUCCESS) {
+            player.sendMessage(StringUtil.color("&cЭтот матч уже недоступен для наблюдения."));
+        }
+    }
+
+    private void openSpectateSelectionMenu(final Player player, final Tournament tournament,
+                                           final List<TournamentMatch> matches, final boolean admin) {
+        final Map<Integer, MatchReference> references = new HashMap<>();
+        final SpectateSelectionMenu holder = new SpectateSelectionMenu(tournament.getName(), references, admin);
+        final int size = Math.min(54, Math.max(9, ((matches.size() + 8) / 9) * 9));
+        final Inventory inventory = Bukkit.createInventory(holder, size,
+                StringUtil.color("&6Матчи: &e" + tournament.getName()));
+        for (int slot = 0; slot < matches.size() && slot < size; slot++) {
+            final TournamentMatch match = matches.get(slot);
+            final ItemStack item = new ItemStack(Material.PLAYER_HEAD);
+            final ItemMeta meta = item.getItemMeta();
+            if (meta != null) {
+                meta.setDisplayName(StringUtil.color("&e" + match.getPlayer1() + " &7vs &e" + match.getPlayer2()));
+                meta.setLore(List.of(
+                        StringUtil.color("&7Раунд: &f" + match.getRound() + " &8| &7Матч: &f#" + match.getNumber()),
+                        StringUtil.color("&aНажмите, чтобы наблюдать")));
+                item.setItemMeta(meta);
+            }
+            inventory.setItem(slot, item);
+            references.put(slot, new MatchReference(match.getRound(), match.getNumber()));
+        }
+        player.openInventory(inventory);
     }
 
     public boolean setLobby(final Player player) {
@@ -964,6 +1418,18 @@ public class TournamentManager implements Loadable, Listener {
                         + (match.getWinner() == null ? "" : " &8| &aПобедитель: &f" + participantName(match.getWinner())));
             }
         }
+        if (tournament.getStatus() == TournamentStatus.FINISHED) {
+            lines.add("&8&m                                                ");
+            lines.add("&6Полная турнирная сетка:");
+            tournament.getMatches().values().stream()
+                    .flatMap(round -> round.values().stream())
+                    .filter(match -> match.getWinner() != null && match.getStatus() != TournamentMatchStatus.BYE)
+                    .sorted(Comparator.comparingInt(TournamentMatch::getRound)
+                            .thenComparingInt(TournamentMatch::getNumber))
+                    .forEach(match -> lines.add("&7Раунд " + match.getRound() + ", матч #" + match.getNumber()
+                            + ": &a" + participantName(match.getWinner()) + " &7победил &c"
+                            + participantName(match.getOpponent(match.getWinner()))));
+        }
         lines.add("&8&m                                                ");
         lines.add("&7Управление: &f/tour menu &7или &f/tour nextmatch " + tournament.getName());
         return lines;
@@ -1105,7 +1571,13 @@ public class TournamentManager implements Loadable, Listener {
         return match != null && activeMatches.containsKey(match);
     }
 
-    public void sendTournamentDeathMessage(final Match match, final Player loser, final Player winner, final double health) {
+    public boolean isActiveTournamentParticipant(final Player player) {
+        return player != null && tournaments.values().stream()
+                .anyMatch(tournament -> tournament.getStatus() == TournamentStatus.IN_PROGRESS
+                        && tournament.hasParticipant(player.getName()));
+    }
+
+    public void sendTournamentDeathMessage(final Match match, final Player loser) {
         final ActiveTournamentMatch active = activeMatches.get(match);
         if (active == null) {
             return;
@@ -1114,6 +1586,13 @@ public class TournamentManager implements Loadable, Listener {
         if (tournament == null || tournament.getStatus() != TournamentStatus.IN_PROGRESS) {
             return;
         }
+        final TournamentMatch tournamentMatch = tournament.getMatch(active.round, active.match);
+        final String winnerName = tournamentMatch == null ? null : tournamentMatch.getOpponent(loser.getName());
+        final Player winner = winnerName == null ? null : Bukkit.getPlayerExact(winnerName);
+        if (winner == null || winner.getUniqueId().equals(loser.getUniqueId())) {
+            return;
+        }
+        final double health = Math.ceil(winner.getHealth()) * 0.5;
         sendToTournamentPlayers(tournament, List.of(
                 "&8&m                                                ",
                 "&6&lТурнир: &e" + tournament.getName(),
@@ -1133,7 +1612,9 @@ public class TournamentManager implements Loadable, Listener {
             return false;
         }
 
-        final List<Player> recipients = onlineTournamentPlayers(tournament);
+        final Set<Player> recipients = match.getAllPlayers().stream()
+                .filter(Player::isOnline)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
         if (recipients.isEmpty()) {
             return true;
         }
@@ -1150,7 +1631,7 @@ public class TournamentManager implements Loadable, Listener {
             }
         }
         builder.add(StringUtil.color("\n&8&m                                                "));
-        builder.send(new HashSet<>(recipients));
+        builder.send(recipients);
         return true;
     }
 
@@ -1175,6 +1656,31 @@ public class TournamentManager implements Loadable, Listener {
         if (winner != null) {
             finishMatch(tournament, match, winner);
         }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onTournamentDeath(final PlayerDeathEvent event) {
+        final ArenaImpl arena = plugin.getArenaManager().get(event.getEntity());
+        final DuelMatch duelMatch = arena == null ? null : arena.getMatch();
+        final ActiveTournamentMatch active = duelMatch == null ? null : activeMatches.get(duelMatch);
+        if (active == null) {
+            return;
+        }
+        final Tournament tournament = getTournament(active.tournament);
+        final TournamentMatch match = tournament == null ? null : tournament.getMatch(active.round, active.match);
+        if (match == null || match.getStatus() != TournamentMatchStatus.IN_PROGRESS) {
+            return;
+        }
+        final Player winner = duelMatch.getAlivePlayers().stream()
+                .filter(player -> !player.getUniqueId().equals(event.getEntity().getUniqueId()))
+                .findFirst()
+                .orElse(null);
+        if (winner == null || !match.hasPlayer(winner.getName())) {
+            return;
+        }
+        finishMatch(tournament, match, winner.getName());
+        // A death is the decisive tournament event. Persist it before delayed duel cleanup.
+        saveDataNow();
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
@@ -1211,7 +1717,10 @@ public class TournamentManager implements Loadable, Listener {
 
     @EventHandler(priority = EventPriority.MONITOR)
     public void onJoin(final PlayerJoinEvent event) {
-        plugin.doSyncAfter(() -> resumeWaitingMatch(event.getPlayer()), 5L);
+        plugin.doSyncAfter(() -> {
+            tryDeliverPendingRewards(event.getPlayer());
+            resumeWaitingMatch(event.getPlayer());
+        }, 5L);
     }
 
     private void resumeWaitingMatch(final Player joined) {
@@ -1269,6 +1778,7 @@ public class TournamentManager implements Loadable, Listener {
         }
 
         match.setWinner(winner);
+        match.setCompletedAt(System.currentTimeMillis());
         match.setStatus(TournamentMatchStatus.FINISHED);
         match.setWaitingSince(0L);
         advanceWinner(tournament, match, winner);
@@ -1281,8 +1791,11 @@ public class TournamentManager implements Loadable, Listener {
         changed(tournament);
 
         if (finished) {
+            finalizeRewards(tournament);
+            changed(tournament);
             releaseTournamentArena(tournament);
             sendFinalResults(tournament);
+            scheduleRewardDelivery(tournament);
         }
     }
 
@@ -1327,19 +1840,130 @@ public class TournamentManager implements Loadable, Listener {
         return name != null && Bukkit.getOfflinePlayer(name).getUniqueId().equals(id);
     }
 
-    private ArenaImpl getArenaForTournament(final Tournament tournament, final KitImpl kit) {
-        if (hasTournamentArenaLimit(tournament)) {
-            final List<ArenaImpl> available = tournament.getAllowedArenas().stream()
-                    .map(plugin.getArenaManager()::get)
-                    .filter(Objects::nonNull)
-                    .filter(arena -> plugin.getArenaManager().isSelectable(kit, arena))
-                    .filter(ArenaImpl::isAvailable)
-                    .collect(Collectors.toList());
-            return available.isEmpty() ? null : available.get(random.nextInt(available.size()));
+    public List<String> describeArenaAvailability(final String tournamentName) {
+        final Tournament tournament = getTournament(tournamentName);
+        if (tournament == null) {
+            return List.of("&cТурнир не найден.");
+        }
+        final List<String> kits = getTournamentKitPool(tournament);
+        if (kits.isEmpty()) {
+            return List.of("&cКит турнира не найден.");
         }
 
-        final String arenaName = settings.defaultArena;
-        return arenaName == null || arenaName.isBlank() ? null : plugin.getArenaManager().get(arenaName);
+        final List<String> lines = new ArrayList<>();
+        lines.add("&cНет свободной разрешённой арены.");
+        lines.add("&7Турнир: &e" + tournament.getName());
+        lines.add("&7Турнирные киты: &f" + String.join(", ", kits));
+        if (!hasTournamentArenaLimit(tournament)) {
+            lines.add("&7Ограничение арен выключено. Текущая арена по умолчанию: &f" + currentArenaName());
+            return lines;
+        }
+
+        lines.add("&7Разрешённые арены: &f" + String.join(", ", tournament.getAllowedArenas()));
+        for (String kitName : kits) {
+            final KitImpl kit = plugin.getKitManager().get(kitName);
+            lines.add("&6Кит &f" + kitName + "&6:");
+            for (String arenaName : tournament.getAllowedArenas()) {
+                final ArenaImpl arena = plugin.getArenaManager().get(arenaName);
+                lines.add("&7- &e" + arenaName + "&7: " + describeArenaState(arena, kit));
+            }
+        }
+        return lines;
+    }
+
+    private String describeArenaState(final ArenaImpl arena, final KitImpl kit) {
+        if (arena == null) {
+            return "&cарена не найдена";
+        }
+        if (arena.isDisabled()) {
+            return "&cарена выключена";
+        }
+        if (arena.isUsed()) {
+            return "&cарена занята матчем";
+        }
+        final var session = plugin.getDestructibleArenaService().getRegistry().byArena(arena.getName());
+        if (session != null && session.getState() != com.meteordevelopments.duels.arena.destructible.SessionState.READY) {
+            return "&cарена восстанавливается: " + session.getState();
+        }
+        if (arena.getPosition(1) == null || arena.getPosition(2) == null) {
+            return "&cне выставлены позиции 1/2";
+        }
+        if (!plugin.getArenaManager().isSelectable(kit, arena)) {
+            if (arena.isBoundless()) {
+                return "&cарена без привязок, а кит требует привязанную арену";
+            }
+            return "&cкит не привязан к этой арене";
+        }
+        return "&aподходит";
+    }
+
+    private ArenaImpl getArenaForTournament(final Tournament tournament, final KitImpl kit) {
+        final List<ArenaImpl> available = getTournamentArenaCandidates(tournament, kit).stream()
+                .filter(arena -> arena.isAvailable() || isReservedTournamentArena(tournament, arena))
+                .collect(Collectors.toList());
+        return available.isEmpty() ? null : available.get(random.nextInt(available.size()));
+    }
+
+    private boolean waitForTournamentArena(final Tournament tournament, final KitImpl kit) {
+        final List<ArenaImpl> candidates = getTournamentArenaCandidates(tournament, kit);
+        if (candidates.stream().anyMatch(arena -> arena.isAvailable() || isReservedTournamentArena(tournament, arena))) {
+            return false;
+        }
+        for (ArenaImpl arena : candidates) {
+            final DuelMatch occupying = arena.getMatch();
+            if (occupying != null && !activeMatches.containsKey(occupying)) {
+                final Player participant = occupying.getAllPlayers().stream().findFirst().orElse(null);
+                if (participant != null) {
+                    plugin.getDuelManager().forceEndMatch(participant, Reason.TIE);
+                    participant.sendMessage(StringUtil.color("&eОбычная дуэль завершена ничьёй: арена освобождается для турнира."));
+                    return true;
+                }
+            }
+            final var session = plugin.getDestructibleArenaService().getRegistry().byArena(arena.getName());
+            if (session != null && session.getState() != com.meteordevelopments.duels.arena.destructible.SessionState.READY) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private List<ArenaImpl> getTournamentArenaCandidates(final Tournament tournament, final KitImpl kit) {
+        if (hasTournamentArenaLimit(tournament)) {
+            return tournament.getAllowedArenas().stream()
+                    .map(plugin.getArenaManager()::get)
+                    .filter(Objects::nonNull)
+                    .filter(arena -> isArenaCompatibleWithKit(arena, kit))
+                    .toList();
+        }
+
+        final ArenaImpl defaultArena = settings.defaultArena == null || settings.defaultArena.isBlank()
+                ? null
+                : plugin.getArenaManager().get(settings.defaultArena);
+        if (isArenaCompatibleWithKit(defaultArena, kit)) {
+            return List.of(defaultArena);
+        }
+
+        // With no explicit tournament restriction, fall back to every compatible
+        // arena instead of forcing an incompatible global default arena.
+        return plugin.getArenaManager().getArenasImpl().stream()
+                .filter(arena -> isArenaCompatibleWithKit(arena, kit))
+                .toList();
+    }
+
+    private boolean isArenaCompatibleWithKit(final ArenaImpl arena, final KitImpl kit) {
+        if (arena == null || arena.getPosition(1) == null || arena.getPosition(2) == null) {
+            return false;
+        }
+        if (arena.isBoundless()) {
+            return kit == null || !kit.isArenaSpecific();
+        }
+        return arena.isBound(kit);
+    }
+
+    private boolean isReservedTournamentArena(final Tournament tournament, final ArenaImpl arena) {
+        return settings.reserveDefaultArena
+                && tournament.getReservedArena() != null
+                && arena.getName().equalsIgnoreCase(tournament.getReservedArena());
     }
 
     private boolean hasTournamentArenaLimit(final Tournament tournament) {
@@ -1393,8 +2017,11 @@ public class TournamentManager implements Loadable, Listener {
         final boolean finished = tournament.getStatus() == TournamentStatus.FINISHED;
         changed(tournament);
         if (finished) {
+            finalizeRewards(tournament);
+            changed(tournament);
             releaseTournamentArena(tournament);
             sendFinalResults(tournament);
+            scheduleRewardDelivery(tournament);
         }
     }
 
@@ -1624,6 +2251,14 @@ public class TournamentManager implements Loadable, Listener {
     private void cleanupKitSelection(final PendingKitSelection selection) {
         pendingKitSelections.remove(selection.key);
         selection.bossBars.values().forEach(BossBar::removeAll);
+        for (String playerName : List.of(selection.player1, selection.player2)) {
+            final Player player = Bukkit.getPlayerExact(playerName);
+            if (player != null
+                    && player.getOpenInventory().getTopInventory().getHolder() instanceof KitSelectionMenu menu
+                    && menu.key().equals(selection.key)) {
+                player.closeInventory();
+            }
+        }
     }
 
     private void openKitSelectionMenu(final Player player, final PendingKitSelection selection) {
@@ -1787,6 +2422,16 @@ public class TournamentManager implements Loadable, Listener {
                         .orElse(null));
     }
 
+    public boolean isActiveParticipant(final Player player) {
+        if (player == null) {
+            return false;
+        }
+        return tournaments.values().stream()
+                .filter(tournament -> tournament.getStatus() == TournamentStatus.IN_PROGRESS)
+                .anyMatch(tournament -> tournament.hasParticipant(player.getName())
+                        && !tournament.isEliminated(player.getName()));
+    }
+
     private Tournament findPlayerOpenTournament(final String player) {
         return tournaments.values().stream()
                 .filter(tournament -> tournament.hasParticipant(player))
@@ -1881,6 +2526,10 @@ public class TournamentManager implements Loadable, Listener {
 
     private boolean preparePlayerForTournamentMatch(final Player player) {
         boolean needsDelay = false;
+        if (plugin.getSpectateManager().isSpectating(player)) {
+            plugin.getSpectateManager().stopSpectating(player);
+            needsDelay = true;
+        }
         final ArenaImpl arena = plugin.getArenaManager().get(player);
         if (arena != null && arena.getMatch() != null) {
             if (activeMatches.containsKey(arena.getMatch())) {
@@ -2106,7 +2755,9 @@ public class TournamentManager implements Loadable, Listener {
             return;
         }
 
-        if (!removeCmiHologramV2(hologramName) && !removeLegacyCmiHologram(hologramName)) {
+        final boolean removedV2 = removeCmiHologramV2(hologramName);
+        final boolean removedLegacy = removeLegacyCmiHologram(hologramName);
+        if (!removedV2 && !removedLegacy) {
             dispatch(Bukkit.getConsoleSender(), settings.cmiRemoveCommand.replace("%hologram%", hologramName));
         }
         removeCmiHologramFromFile(hologramName);
@@ -2710,6 +3361,7 @@ public class TournamentManager implements Loadable, Listener {
                         + " &7vs &f" + participantName(match.getPlayer2()),
                 "&7Раунд: &f" + match.getRound() + " &8| &7Матч: &f#" + match.getNumber()
                         + (arena == null ? "" : " &8| &7Арена: &e" + arena.getName()),
+                "&7Набор: &f" + (match.getSelectedKit() == null ? tournament.getKit() : match.getSelectedKit()),
                 "&8&m                                                "));
     }
 
@@ -2746,6 +3398,13 @@ public class TournamentManager implements Loadable, Listener {
         if (match == null) {
             return;
         }
+
+        sendToTournamentPlayers(tournament, List.of(
+                "&8&m                                                ",
+                "&6&lСледующая пара турнира",
+                "&f" + participantName(match.getPlayer1()) + " &7vs &f" + participantName(match.getPlayer2()),
+                "&7Раунд: &f" + match.getRound() + " &8| &7Матч: &f#" + match.getNumber(),
+                "&8&m                                                "));
 
         final Player player1 = Bukkit.getPlayerExact(match.getPlayer1());
         final Player player2 = Bukkit.getPlayerExact(match.getPlayer2());
@@ -2821,18 +3480,273 @@ public class TournamentManager implements Loadable, Listener {
             lines.add("&e3 место: &f" + displayName(results.third));
         }
         lines.add("&8&m                                                ");
-        for (Map<Integer, TournamentMatch> round : tournament.getMatches().values()) {
-            for (TournamentMatch match : round.values()) {
-                if (match.getWinner() == null || match.getStatus() == TournamentMatchStatus.BYE) {
-                    continue;
-                }
-                lines.add("&7Раунд " + match.getRound() + ", матч #" + match.getNumber() + ": &a" + participantName(match.getWinner())
-                        + " &7победил &c" + participantName(match.getOpponent(match.getWinner())));
-            }
-        }
+        lines.add("&7Полная сетка доступна организатору через &f/tour info " + tournament.getName());
         lines.add("&8&m                                                ");
 
         sendToTournamentPlayers(tournament, lines);
+    }
+
+    private void finalizeRewards(final Tournament tournament) {
+        if (!tournament.isRewardsEnabled() || tournament.isRewardsFinalized()) return;
+        final TournamentResults results = getTournamentResults(tournament);
+        final List<String> winners = java.util.Arrays.asList(results.first(), results.second(), results.third());
+        if (results.first() == null) {
+            plugin.getLogger().warning("Tournament rewards were not finalized because the winner is unknown: tournament="
+                    + tournament.getName());
+            return;
+        }
+
+        final List<BigDecimal> amounts = switch (tournament.getRewardType()) {
+            case ITEMS -> List.of(BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO);
+            case FIXED_MONEY -> List.of(tournament.getFixedFirstReward(), tournament.getFixedSecondReward(),
+                    tournament.getFixedThirdReward());
+            case ENTRY_FEE_POOL -> TournamentRewardCalculator.distribute(tournament.getRewardFund(),
+                    tournament.getFirstRewardPercent(), tournament.getSecondRewardPercent(), tournament.getThirdRewardPercent());
+        };
+        for (int index = 0; index < 3; index++) {
+            final String winner = winners.get(index);
+            if (winner == null || winner.isBlank()) continue;
+            final TournamentRewardDelivery delivery = new TournamentRewardDelivery(index + 1);
+            final OfflinePlayer offline = Bukkit.getOfflinePlayer(winner);
+            delivery.setWinnerId(offline.getUniqueId());
+            delivery.setWinnerName(winner);
+            delivery.setAmount(TournamentRewardCalculator.nonNegative(amounts.get(index)));
+            if (tournament.getRewardType() == TournamentRewardType.ITEMS) {
+                copyConfiguredRewardItems(tournament, index + 1, delivery);
+            }
+            tournament.getRewardDeliveries().put(index + 1, delivery);
+        }
+        tournament.setRewardsFinalized(true);
+        plugin.getLogger().info("Tournament rewards finalized: tournament=" + tournament.getName()
+                + ", type=" + tournament.getRewardType() + ", fund=" + tournament.getRewardFund().toPlainString()
+                + ", payouts=" + amounts);
+        saveCriticalData();
+    }
+
+    private void copyConfiguredRewardItems(final Tournament tournament, final int place,
+                                           final TournamentRewardDelivery delivery) {
+        int itemIndex = 0;
+        for (ItemStack configured : tournament.getItemRewards().getOrDefault(place, List.of())) {
+            final ItemStack item = configured.clone();
+            final ItemMeta meta = item.getItemMeta();
+            if (meta != null) {
+                meta.getPersistentDataContainer().set(rewardDeliveryKey, PersistentDataType.STRING,
+                        delivery.getDeliveryId() + ":" + itemIndex++);
+                item.setItemMeta(meta);
+            }
+            delivery.getItems().add(item);
+        }
+    }
+
+    private void tryDeliverPendingRewards(final Player player) {
+        for (Tournament tournament : tournaments.values()) {
+            tryDeliverRewards(tournament, player);
+        }
+    }
+
+    /**
+     * Called only after PlayerInfoManager has successfully restored and durably
+     * removed the player's pre-match snapshot.
+     */
+    public void onPlayerStateRestored(final Player player) {
+        if (player == null || !player.isOnline()) {
+            return;
+        }
+        plugin.doSyncAfter(() -> {
+            if (player.isOnline()) {
+                tryDeliverPendingRewards(player);
+            }
+        }, 1L);
+    }
+
+    private void scheduleRewardDelivery(final Tournament tournament) {
+        // Normal duel cleanup/respawn is asynchronous relative to the decisive
+        // death event. The PlayerInfo callback above is authoritative; these
+        // retries cover winners whose snapshot was restored before finalization.
+        plugin.doSyncAfter(() -> tryDeliverRewards(tournament, null), 20L);
+        plugin.doSyncAfter(() -> tryDeliverRewards(tournament, null), 60L);
+    }
+
+    private void logInterruptedMoneyRewards() {
+        for (Tournament tournament : tournaments.values()) {
+            if (tournament.getRewardType() == TournamentRewardType.ITEMS) continue;
+            for (TournamentRewardDelivery delivery : tournament.getRewardDeliveries().values()) {
+                if (delivery.getStatus() == TournamentRewardStatus.PROCESSING) {
+                    plugin.getLogger().warning("Interrupted monetary tournament reward requires economy audit; "
+                            + "automatic retry is blocked to prevent duplicate payment: tournament="
+                            + tournament.getName() + ", place=" + delivery.getPlace());
+                }
+            }
+        }
+    }
+
+    private void tryDeliverRewards(final Tournament tournament, final Player joinedPlayer) {
+        if (!tournament.isRewardsFinalized()) return;
+        for (TournamentRewardDelivery delivery : tournament.getRewardDeliveries().values()) {
+            if (joinedPlayer != null && !joinedPlayer.getUniqueId().equals(delivery.getWinnerId())) continue;
+            if (tournament.getRewardType() == TournamentRewardType.ITEMS) {
+                final Player winner = joinedPlayer != null ? joinedPlayer : Bukkit.getPlayer(delivery.getWinnerId());
+                if (winner == null || !isPlayerReadyForItemReward(winner)) {
+                    continue;
+                }
+                if (winner != null && delivery.getStatus() == TournamentRewardStatus.PROCESSING) {
+                    reconcileProcessingItems(tournament, delivery, winner);
+                }
+                if (winner != null && delivery.getStatus() == TournamentRewardStatus.NOT_PAID) {
+                    deliverItems(tournament, delivery, winner);
+                }
+            } else {
+                if (delivery.getStatus() == TournamentRewardStatus.NOT_PAID) deliverMoney(tournament, delivery);
+            }
+        }
+    }
+
+    private boolean isPlayerReadyForItemReward(final Player player) {
+        if (!player.isOnline() || player.isDead() || plugin.getPlayerManager().get(player) != null) {
+            return false;
+        }
+        final ArenaImpl arena = plugin.getArenaManager().get(player);
+        return arena == null || arena.getMatch() == null;
+    }
+
+    private void reconcileProcessingItems(final Tournament tournament, final TournamentRewardDelivery delivery,
+                                          final Player player) {
+        final Set<String> received = new HashSet<>();
+        for (ItemStack item : player.getInventory().getContents()) {
+            if (item == null || !item.hasItemMeta()) continue;
+            final String marker = item.getItemMeta().getPersistentDataContainer()
+                    .get(rewardDeliveryKey, PersistentDataType.STRING);
+            if (marker != null && marker.startsWith(delivery.getDeliveryId() + ":")) received.add(marker);
+        }
+        delivery.getItems().removeIf(item -> {
+            if (item == null || !item.hasItemMeta()) return false;
+            final String marker = item.getItemMeta().getPersistentDataContainer()
+                    .get(rewardDeliveryKey, PersistentDataType.STRING);
+            return marker != null && received.contains(marker);
+        });
+        delivery.setStatus(delivery.getItems().isEmpty()
+                ? TournamentRewardStatus.PAID : TournamentRewardStatus.NOT_PAID);
+        plugin.getLogger().info("Tournament item reward reconciled after interrupted delivery: tournament="
+                + tournament.getName() + ", place=" + delivery.getPlace() + ", remaining=" + delivery.getItems().size());
+        saveCriticalData();
+    }
+
+    private void deliverMoney(final Tournament tournament, final TournamentRewardDelivery delivery) {
+        final BigDecimal amount = TournamentRewardCalculator.nonNegative(delivery.getAmount());
+        if (amount.signum() == 0) {
+            delivery.setStatus(TournamentRewardStatus.PAID);
+            saveCriticalData();
+            return;
+        }
+        if (delivery.getWinnerId() == null) {
+            plugin.getLogger().warning("Tournament money reward postponed: economy or winner unavailable, tournament="
+                    + tournament.getName() + ", place=" + delivery.getPlace());
+            return;
+        }
+        delivery.setStatus(TournamentRewardStatus.PROCESSING);
+        saveCriticalData();
+        try {
+            if (depositRewardMoney(delivery.getWinnerId(), amount.doubleValue())) {
+                delivery.setStatus(TournamentRewardStatus.PAID);
+                plugin.getLogger().info("Tournament money reward paid: tournament=" + tournament.getName()
+                        + ", place=" + delivery.getPlace() + ", player=" + delivery.getWinnerName()
+                        + ", amount=" + amount.toPlainString());
+            } else {
+                delivery.setStatus(TournamentRewardStatus.NOT_PAID);
+                plugin.getLogger().warning("Tournament money reward failed: tournament=" + tournament.getName()
+                        + ", place=" + delivery.getPlace() + ", player=" + delivery.getWinnerName());
+            }
+        } catch (RuntimeException ex) {
+            delivery.setStatus(TournamentRewardStatus.NOT_PAID);
+            plugin.getLogger().warning("Tournament money reward failed: tournament=" + tournament.getName()
+                    + ", place=" + delivery.getPlace() + ": " + ex.getMessage());
+        }
+        saveCriticalData();
+    }
+
+    private boolean depositRewardMoney(final UUID playerId, final double amount) {
+        if (!Double.isFinite(amount) || amount < 0D) return false;
+        if (Bukkit.getPluginManager().isPluginEnabled("CMI")) {
+            try {
+                final Class<?> cmiUserClass = Class.forName("com.Zrips.CMI.Containers.CMIUser");
+                final Object cmiUser = cmiUserClass.getMethod("getUser", UUID.class).invoke(null, playerId);
+                if (cmiUser == null) return false;
+                final double before = ((Number) cmiUserClass.getMethod("getBalance").invoke(cmiUser)).doubleValue();
+                cmiUserClass.getMethod("deposit", Double.class).invoke(cmiUser, amount);
+                final double after = ((Number) cmiUserClass.getMethod("getBalance").invoke(cmiUser)).doubleValue();
+                try { cmiUserClass.getMethod("addForDelayedSave").invoke(cmiUser); }
+                catch (ReflectiveOperationException ignored) { }
+                return after + 0.000001D >= before + amount;
+            } catch (ReflectiveOperationException | LinkageError | ClassCastException ex) {
+                plugin.getLogger().warning("CMI tournament reward deposit failed for player=" + playerId + ": " + ex.getMessage());
+                return false;
+            }
+        }
+        final Economy economy = getEconomy();
+        if (economy == null) return false;
+        final EconomyResponse response = economy.depositPlayer(Bukkit.getOfflinePlayer(playerId), amount);
+        return response != null && response.transactionSuccess();
+    }
+
+    private void deliverItems(final Tournament tournament, final TournamentRewardDelivery delivery, final Player player) {
+        if (!isPlayerReadyForItemReward(player)) {
+            return;
+        }
+        if (delivery.getItems().isEmpty()) {
+            delivery.setStatus(TournamentRewardStatus.PAID);
+            saveCriticalData();
+            return;
+        }
+        if (!canFit(player, delivery.getItems())) {
+            player.sendMessage(StringUtil.color("&eТурнирная награда за &f" + delivery.getPlace()
+                    + " место &eожидает выдачи: освободите место в инвентаре и перезайдите."));
+            return;
+        }
+        delivery.setStatus(TournamentRewardStatus.PROCESSING);
+        saveCriticalData();
+        final Map<Integer, ItemStack> leftovers = player.getInventory().addItem(delivery.getItems().stream()
+                .map(ItemStack::clone).toArray(ItemStack[]::new));
+        if (leftovers.isEmpty()) {
+            delivery.getItems().clear();
+            delivery.setStatus(TournamentRewardStatus.PAID);
+            player.sendMessage(StringUtil.color("&aПолучена турнирная награда за &e" + delivery.getPlace() + " место&a."));
+            plugin.getLogger().info("Tournament item reward delivered: tournament=" + tournament.getName()
+                    + ", place=" + delivery.getPlace() + ", player=" + delivery.getWinnerName());
+        } else {
+            delivery.getItems().clear();
+            leftovers.values().stream().map(ItemStack::clone).forEach(delivery.getItems()::add);
+            delivery.setStatus(TournamentRewardStatus.NOT_PAID);
+            plugin.getLogger().warning("Tournament item reward partially delivered; leftovers retained: tournament="
+                    + tournament.getName() + ", place=" + delivery.getPlace() + ", player=" + delivery.getWinnerName());
+        }
+        saveCriticalData();
+    }
+
+    private boolean canFit(final Player player, final List<ItemStack> rewards) {
+        final List<ItemStack> simulated = new ArrayList<>();
+        for (ItemStack current : player.getInventory().getStorageContents()) {
+            simulated.add(current == null ? null : current.clone());
+        }
+        for (ItemStack reward : rewards) {
+            int remaining = reward.getAmount();
+            for (ItemStack current : simulated) {
+                if (current != null && current.isSimilar(reward)) {
+                    final int added = Math.max(0, Math.min(remaining, current.getMaxStackSize() - current.getAmount()));
+                    current.setAmount(current.getAmount() + added);
+                    remaining -= added;
+                }
+            }
+            for (int slot = 0; remaining > 0 && slot < simulated.size(); slot++) {
+                if (simulated.get(slot) == null || simulated.get(slot).getType() == Material.AIR) {
+                    final ItemStack placed = reward.clone();
+                    placed.setAmount(Math.min(remaining, reward.getMaxStackSize()));
+                    simulated.set(slot, placed);
+                    remaining -= placed.getAmount();
+                }
+            }
+            if (remaining > 0) return false;
+        }
+        return true;
     }
 
     private List<Player> onlineTournamentPlayers(final Tournament tournament) {
@@ -2867,6 +3781,7 @@ public class TournamentManager implements Loadable, Listener {
         if (!dataFile.exists()) {
             return;
         }
+        boolean recoveredInterruptedMatch = false;
 
         final FileConfiguration data = YamlConfiguration.loadConfiguration(dataFile);
         final ConfigurationSection history = data.getConfigurationSection("kit-history");
@@ -2889,6 +3804,7 @@ public class TournamentManager implements Loadable, Listener {
         for (String name : root.getKeys(false)) {
             final String path = "tournaments." + name;
             final Tournament tournament = new Tournament(name, data.getString(path + ".kit", ""));
+            tournament.setId(parseUuid(data.getString(path + ".id"), UUID.randomUUID()));
             tournament.setKitMode(parseKitMode(data.getString(path + ".kit-mode",
                     settings.kitSelectionEnabled ? TournamentKitMode.PLAYER_CHOICE.name() : TournamentKitMode.FIXED.name())));
             tournament.setStatus(TournamentStatus.valueOf(data.getString(path + ".status", TournamentStatus.CREATED.name())));
@@ -2906,6 +3822,68 @@ public class TournamentManager implements Loadable, Listener {
             tournament.setHologramDirection(data.getString(path + ".hologram.direction", settings.hologramDirection));
             tournament.setReservedArena(data.getString(path + ".reserved-arena.name"));
             tournament.setReservedArenaWasDisabled(data.getBoolean(path + ".reserved-arena.was-disabled", false));
+            tournament.setPlaytimeRequirementEnabled(data.getBoolean(path + ".registration.playtime.enabled", false));
+            tournament.setRequiredPlaytimeHours(Math.max(0, data.getInt(path + ".registration.playtime.required-hours", 20)));
+            tournament.setEntryFeeEnabled(data.getBoolean(path + ".registration.entry-fee.enabled", false));
+            tournament.setEntryFeeAmount(Math.max(0D, data.getDouble(path + ".registration.entry-fee.amount", 500D)));
+            tournament.setRewardsEnabled(data.getBoolean(path + ".rewards.enabled", false));
+            tournament.setRewardType(parseRewardType(data.getString(path + ".rewards.type")));
+            tournament.setFixedFirstReward(parseMoney(data.getString(path + ".rewards.fixed.1")));
+            tournament.setFixedSecondReward(parseMoney(data.getString(path + ".rewards.fixed.2")));
+            tournament.setFixedThirdReward(parseMoney(data.getString(path + ".rewards.fixed.3")));
+            tournament.setFirstRewardPercent(Math.max(0, data.getInt(path + ".rewards.distribution.1", 60)));
+            tournament.setSecondRewardPercent(Math.max(0, data.getInt(path + ".rewards.distribution.2", 30)));
+            tournament.setThirdRewardPercent(Math.max(0, data.getInt(path + ".rewards.distribution.3", 10)));
+            if (tournament.getFirstRewardPercent() + tournament.getSecondRewardPercent() + tournament.getThirdRewardPercent() != 100) {
+                tournament.setFirstRewardPercent(60);
+                tournament.setSecondRewardPercent(30);
+                tournament.setThirdRewardPercent(10);
+            }
+            tournament.setRewardFund(parseMoney(data.getString(path + ".rewards.fund")));
+            tournament.setRewardsFinalized(data.getBoolean(path + ".rewards.finalized", false));
+            for (int place = 1; place <= 3; place++) {
+                final List<ItemStack> items = new ArrayList<>();
+                for (Object value : data.getList(path + ".rewards.items." + place, List.of())) {
+                    if (value instanceof ItemStack item && item.getType() != Material.AIR) items.add(item.clone());
+                }
+                tournament.getItemRewards().put(place, items);
+            }
+            final ConfigurationSection payments = data.getConfigurationSection(path + ".rewards.payments");
+            if (payments != null) {
+                for (String key : payments.getKeys(false)) {
+                    final UUID paymentId = parseUuid(key, null);
+                    if (paymentId == null) continue;
+                    final String paymentPath = path + ".rewards.payments." + key;
+                    final TournamentPaymentRecord record = new TournamentPaymentRecord(paymentId,
+                            parseUuid(data.getString(paymentPath + ".player-id"), new UUID(0L, 0L)),
+                            data.getString(paymentPath + ".player-name", "unknown"),
+                            parseUuid(data.getString(paymentPath + ".tournament-id"), tournament.getId()),
+                            parseMoney(data.getString(paymentPath + ".amount")),
+                            data.getLong(paymentPath + ".paid-at", 0L),
+                            parsePaymentStatus(data.getString(paymentPath + ".status")),
+                            data.getBoolean(paymentPath + ".added-to-fund", false));
+                    tournament.getPaymentRecords().put(paymentId, record);
+                }
+            }
+            final ConfigurationSection deliveries = data.getConfigurationSection(path + ".rewards.deliveries");
+            if (deliveries != null) {
+                for (String key : deliveries.getKeys(false)) {
+                    final int place;
+                    try { place = Integer.parseInt(key); } catch (NumberFormatException ignored) { continue; }
+                    if (place < 1 || place > 3) continue;
+                    final String deliveryPath = path + ".rewards.deliveries." + key;
+                    final TournamentRewardDelivery delivery = new TournamentRewardDelivery(place,
+                            parseUuid(data.getString(deliveryPath + ".id"), UUID.randomUUID()));
+                    delivery.setWinnerId(parseUuid(data.getString(deliveryPath + ".winner-id"), null));
+                    delivery.setWinnerName(data.getString(deliveryPath + ".winner-name"));
+                    delivery.setAmount(parseMoney(data.getString(deliveryPath + ".amount")));
+                    delivery.setStatus(parseRewardStatus(data.getString(deliveryPath + ".status")));
+                    for (Object value : data.getList(deliveryPath + ".items", List.of())) {
+                        if (value instanceof ItemStack item && item.getType() != Material.AIR) delivery.getItems().add(item.clone());
+                    }
+                    tournament.getRewardDeliveries().put(place, delivery);
+                }
+            }
             tournament.getPlayers().addAll(data.getStringList(path + ".players"));
             tournament.getEliminatedPlayers().addAll(data.getStringList(path + ".eliminated-players"));
             tournament.getAllowedKits().addAll(data.getStringList(path + ".allowed-kits"));
@@ -2928,17 +3906,23 @@ public class TournamentManager implements Loadable, Listener {
                         match.setPlayer1(data.getString(matchPath + ".player1"));
                         match.setPlayer2(data.getString(matchPath + ".player2"));
                         match.setWinner(data.getString(matchPath + ".winner"));
+                        match.setSelectedKit(data.getString(matchPath + ".selected-kit"));
                         match.setStatus(TournamentMatchStatus.valueOf(data.getString(matchPath + ".status", TournamentMatchStatus.WAITING.name())));
                         if (match.getStatus() == TournamentMatchStatus.STARTING || match.getStatus() == TournamentMatchStatus.IN_PROGRESS) {
                             match.setStatus(TournamentMatchStatus.READY);
+                            recoveredInterruptedMatch = true;
                         }
                         match.setWaitingSince(data.getLong(matchPath + ".waiting-since", 0L));
+                        match.setCompletedAt(data.getLong(matchPath + ".completed-at", 0L));
                         matches.put(number, match);
                     }
                     tournament.getMatches().put(round, matches);
                 }
             }
             tournaments.put(normalize(name), tournament);
+        }
+        if (recoveredInterruptedMatch) {
+            saveData();
         }
     }
 
@@ -2975,6 +3959,7 @@ public class TournamentManager implements Loadable, Listener {
         final String snapshot = createDataSnapshot();
         if (dataWriter != null) {
             dataWriter.closeAndWrite(snapshot);
+            dataWriter = null;
             return;
         }
         try {
@@ -2982,6 +3967,25 @@ public class TournamentManager implements Loadable, Listener {
         } catch (IOException ex) {
             plugin.getLogger().warning("Could not save tournaments.yml: " + ex.getMessage());
         }
+    }
+
+    private void saveCriticalData() {
+        final String snapshot = createDataSnapshot();
+        if (dataWriter != null) {
+            dataWriter.closeAndWrite(snapshot);
+            dataWriter = createDataWriter();
+            return;
+        }
+        try {
+            writeData(snapshot);
+        } catch (IOException ex) {
+            plugin.getLogger().warning("Could not synchronously save tournaments.yml: " + ex.getMessage());
+        }
+    }
+
+    private LatestSnapshotWriter<String> createDataWriter() {
+        return new LatestSnapshotWriter<>(plugin::doAsync, this::writeData,
+                ex -> plugin.getLogger().warning("Could not save tournaments.yml: " + ex.getMessage()));
     }
 
     private String createDataSnapshot() {
@@ -2993,6 +3997,7 @@ public class TournamentManager implements Loadable, Listener {
         for (Tournament tournament : tournaments.values()) {
             final String path = "tournaments." + tournament.getName();
             data.set(path + ".kit", tournament.getKit());
+            data.set(path + ".id", tournament.getId().toString());
             data.set(path + ".kit-mode", tournament.getKitMode().name());
             data.set(path + ".status", tournament.getStatus().name());
             data.set(path + ".current-round", tournament.getCurrentRound());
@@ -3000,6 +4005,43 @@ public class TournamentManager implements Loadable, Listener {
             data.set(path + ".eliminated-players", new ArrayList<>(tournament.getEliminatedPlayers()));
             data.set(path + ".allowed-kits", new ArrayList<>(tournament.getAllowedKits()));
             data.set(path + ".allowed-arenas", new ArrayList<>(tournament.getAllowedArenas()));
+            data.set(path + ".registration.playtime.enabled", tournament.isPlaytimeRequirementEnabled());
+            data.set(path + ".registration.playtime.required-hours", tournament.getRequiredPlaytimeHours());
+            data.set(path + ".registration.entry-fee.enabled", tournament.isEntryFeeEnabled());
+            data.set(path + ".registration.entry-fee.amount", tournament.getEntryFeeAmount());
+            data.set(path + ".rewards.enabled", tournament.isRewardsEnabled());
+            data.set(path + ".rewards.type", tournament.getRewardType().name());
+            data.set(path + ".rewards.fixed.1", tournament.getFixedFirstReward().toPlainString());
+            data.set(path + ".rewards.fixed.2", tournament.getFixedSecondReward().toPlainString());
+            data.set(path + ".rewards.fixed.3", tournament.getFixedThirdReward().toPlainString());
+            data.set(path + ".rewards.distribution.1", tournament.getFirstRewardPercent());
+            data.set(path + ".rewards.distribution.2", tournament.getSecondRewardPercent());
+            data.set(path + ".rewards.distribution.3", tournament.getThirdRewardPercent());
+            data.set(path + ".rewards.fund", TournamentRewardCalculator.nonNegative(tournament.getRewardFund()).toPlainString());
+            data.set(path + ".rewards.finalized", tournament.isRewardsFinalized());
+            for (int place = 1; place <= 3; place++) {
+                data.set(path + ".rewards.items." + place, tournament.getItemRewards().getOrDefault(place, List.of())
+                        .stream().map(ItemStack::clone).toList());
+            }
+            for (TournamentPaymentRecord payment : tournament.getPaymentRecords().values()) {
+                final String paymentPath = path + ".rewards.payments." + payment.getPaymentId();
+                data.set(paymentPath + ".player-id", payment.getPlayerId().toString());
+                data.set(paymentPath + ".player-name", payment.getPlayerName());
+                data.set(paymentPath + ".tournament-id", payment.getTournamentId().toString());
+                data.set(paymentPath + ".amount", payment.getAmount().toPlainString());
+                data.set(paymentPath + ".paid-at", payment.getPaidAt());
+                data.set(paymentPath + ".status", payment.getStatus().name());
+                data.set(paymentPath + ".added-to-fund", payment.isAddedToFund());
+            }
+            for (TournamentRewardDelivery delivery : tournament.getRewardDeliveries().values()) {
+                final String deliveryPath = path + ".rewards.deliveries." + delivery.getPlace();
+                data.set(deliveryPath + ".id", delivery.getDeliveryId().toString());
+                data.set(deliveryPath + ".winner-id", delivery.getWinnerId() == null ? null : delivery.getWinnerId().toString());
+                data.set(deliveryPath + ".winner-name", delivery.getWinnerName());
+                data.set(deliveryPath + ".amount", delivery.getAmount().toPlainString());
+                data.set(deliveryPath + ".status", delivery.getStatus().name());
+                data.set(deliveryPath + ".items", delivery.getItems().stream().map(ItemStack::clone).toList());
+            }
             data.set(path + ".hologram.name", tournament.getHologramName());
             data.set(path + ".hologram.world", tournament.getHologramWorld());
             data.set(path + ".hologram.x", tournament.getHologramX());
@@ -3020,8 +4062,10 @@ public class TournamentManager implements Loadable, Listener {
                     data.set(matchPath + ".player1", match.getPlayer1());
                     data.set(matchPath + ".player2", match.getPlayer2());
                     data.set(matchPath + ".winner", match.getWinner());
+                    data.set(matchPath + ".selected-kit", match.getSelectedKit());
                     data.set(matchPath + ".status", match.getStatus().name());
                     data.set(matchPath + ".waiting-since", match.getWaitingSince());
+                    data.set(matchPath + ".completed-at", match.getCompletedAt());
                 }
             }
         }
@@ -3041,6 +4085,46 @@ public class TournamentManager implements Loadable, Listener {
         }
     }
 
+    private TournamentRewardType parseRewardType(final String value) {
+        try {
+            return TournamentRewardType.valueOf(value == null ? TournamentRewardType.ITEMS.name() : value.toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException ignored) {
+            return TournamentRewardType.ITEMS;
+        }
+    }
+
+    private TournamentPaymentStatus parsePaymentStatus(final String value) {
+        try {
+            return TournamentPaymentStatus.valueOf(value == null ? TournamentPaymentStatus.FAILED.name() : value);
+        } catch (IllegalArgumentException ignored) {
+            return TournamentPaymentStatus.FAILED;
+        }
+    }
+
+    private TournamentRewardStatus parseRewardStatus(final String value) {
+        try {
+            return TournamentRewardStatus.valueOf(value == null ? TournamentRewardStatus.NOT_PAID.name() : value);
+        } catch (IllegalArgumentException ignored) {
+            return TournamentRewardStatus.NOT_PAID;
+        }
+    }
+
+    private BigDecimal parseMoney(final String value) {
+        try {
+            return TournamentRewardCalculator.nonNegative(new BigDecimal(value == null ? "0" : value));
+        } catch (NumberFormatException ignored) {
+            return BigDecimal.ZERO;
+        }
+    }
+
+    private UUID parseUuid(final String value, final UUID fallback) {
+        try {
+            return value == null ? fallback : UUID.fromString(value);
+        } catch (IllegalArgumentException ignored) {
+            return fallback;
+        }
+    }
+
     private record ActiveTournamentMatch(String tournament, int round, int match) {
     }
 
@@ -3049,6 +4133,17 @@ public class TournamentManager implements Loadable, Listener {
         public Inventory getInventory() {
             return null;
         }
+    }
+
+    private record SpectateSelectionMenu(String tournament, Map<Integer, MatchReference> matches,
+                                         boolean admin) implements InventoryHolder {
+        @Override
+        public Inventory getInventory() {
+            return null;
+        }
+    }
+
+    private record MatchReference(int round, int match) {
     }
 
     private static class PendingKitSelection {
@@ -3137,7 +4232,18 @@ public class TournamentManager implements Loadable, Listener {
         NOT_FOUND,
         LOCKED,
         ALREADY_ADDED,
-        ALREADY_IN_OTHER_TOURNAMENT
+        ALREADY_IN_OTHER_TOURNAMENT,
+        NOT_ENOUGH_PLAYTIME,
+        ECONOMY_UNAVAILABLE,
+        NOT_ENOUGH_MONEY,
+        ECONOMY_WITHDRAW_FAILED
+    }
+
+    private enum EntryFeeWithdrawResult {
+        SUCCESS,
+        ECONOMY_UNAVAILABLE,
+        NOT_ENOUGH_MONEY,
+        WITHDRAW_FAILED
     }
 
     public enum CreateResult {
@@ -3197,8 +4303,18 @@ public class TournamentManager implements Loadable, Listener {
         NOT_READY
     }
 
+    public enum RewardRetryResult {
+        SUCCESS,
+        NOT_FOUND,
+        NOT_READY,
+        NO_WINNER,
+        NO_REWARD,
+        ALREADY_PENDING
+    }
+
     public enum SpectateResult {
         SUCCESS,
+        MENU_OPENED,
         NOT_FOUND,
         NO_MATCH,
         NOT_STARTED,

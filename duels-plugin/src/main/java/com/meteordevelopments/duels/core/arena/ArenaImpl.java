@@ -267,6 +267,7 @@ public class ArenaImpl extends BaseButton implements Arena {
         if (!endingMatch.tryBeginRestoring()) {
             return;
         }
+        plugin.getDuelManager().finishMatchAccess(endingMatch);
         spectateManager.stopSpectating(this);
 
         final MatchEndEvent event = new MatchEndEvent(endingMatch, winner, loser, reason);

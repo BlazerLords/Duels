@@ -37,6 +37,12 @@ public class SpectateCommand extends BaseCommand {
             return;
         }
 
+        if (plugin.getTournamentManager() != null
+                && plugin.getTournamentManager().isActiveTournamentParticipant(player)) {
+            player.sendMessage("§cВо время турнира используйте только /tour spec.");
+            return;
+        }
+
         if (args.length == 0) {
             lang.sendMessage(sender, "COMMAND.spectate.usage", "command", label);
             return;
@@ -51,6 +57,13 @@ public class SpectateCommand extends BaseCommand {
 
         if (target == null) {
             lang.sendMessage(sender, "ERROR.player.not-found", "name", args[0]);
+            return;
+        }
+
+        final ArenaImpl targetArena = arenaManager.get(target);
+        if (targetArena != null && plugin.getTournamentManager() != null
+                && plugin.getTournamentManager().isTournamentMatch(targetArena.getMatch())) {
+            player.sendMessage("§cТурнирные матчи доступны только через /tour spec.");
             return;
         }
 

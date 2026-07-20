@@ -26,6 +26,10 @@ public final class ArenaBlockListener implements Listener {
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onPlace(BlockPlaceEvent event) {
         if (event instanceof BlockMultiPlaceEvent) return;
+        if (denyWhenMasterDisabled(event.getPlayer())) {
+            event.setCancelled(true);
+            return;
+        }
         if (!applies(event.getPlayer(), event.getBlockPlaced())) return;
         ArenaProtectionService.Decision decision = service.getProtection().canPlace(event.getPlayer(), event.getBlockPlaced(), event.getBlockPlaced().getType());
         if (!decision.allowed()) {
@@ -38,6 +42,10 @@ public final class ArenaBlockListener implements Listener {
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onMultiPlace(BlockMultiPlaceEvent event) {
+        if (denyWhenMasterDisabled(event.getPlayer())) {
+            event.setCancelled(true);
+            return;
+        }
         if (event.getReplacedBlockStates().stream().noneMatch(state -> applies(event.getPlayer(), state.getBlock()))) return;
         DestructibleArenaSession session = null;
         for (BlockState state : event.getReplacedBlockStates()) {
@@ -57,6 +65,12 @@ public final class ArenaBlockListener implements Listener {
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onBreak(BlockBreakEvent event) {
+        if (denyWhenMasterDisabled(event.getPlayer())) {
+            event.setCancelled(true);
+            event.setDropItems(false);
+            event.setExpToDrop(0);
+            return;
+        }
         if (!applies(event.getPlayer(), event.getBlock())) return;
         ArenaProtectionService.Decision decision = service.getProtection().canBreak(event.getPlayer(), event.getBlock());
         if (!decision.allowed()) {
@@ -77,6 +91,10 @@ public final class ArenaBlockListener implements Listener {
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onBucketEmpty(PlayerBucketEmptyEvent event) {
+        if (denyWhenMasterDisabled(event.getPlayer())) {
+            event.setCancelled(true);
+            return;
+        }
         org.bukkit.block.Block target = event.getBlockClicked().getRelative(event.getBlockFace());
         if (!applies(event.getPlayer(), target)) return;
         DestructibleArenaSession session = service.getRegistry().byPlayer(event.getPlayer());
@@ -95,5 +113,11 @@ public final class ArenaBlockListener implements Listener {
 
     private boolean applies(org.bukkit.entity.Player player, org.bukkit.block.Block block) {
         return service.getRegistry().byPlayer(player) != null || service.getRegistry().at(block.getLocation()) != null;
+    }
+
+    private boolean denyWhenMasterDisabled(final org.bukkit.entity.Player player) {
+        if (!service.isDestructionDisabled(player)) return false;
+        message(player, "&cИзменение арены выключено для выбранного кита.");
+        return true;
     }
 }

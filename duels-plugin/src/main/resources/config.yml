@@ -314,7 +314,7 @@ duel:
 
   # If set to 'true', players in duel will not be able to drop items.
   # default: false
-  prevent-item-drop: false
+  prevent-item-drop: true
   clear-items-after-duel: true
 
   # If set to 'true', players in duel will not be able to pickup items on the ground.
@@ -339,6 +339,13 @@ duel:
   # List of commands to allow while in a duel.
   # NOTE: Only active if 'block-all-commands' is enabled!
   whitelisted-commands:
+    - 'duel'
+    - '1v1'
+    - 'duels'
+    - 'tour'
+    - 'tournament'
+    - 'spec'
+    - 'spectate'
     - 'msg'
     - 'r'
     - 'w'
@@ -355,6 +362,16 @@ duel:
   # List of commands to block while in a duel.
   # NOTE: Only active if 'block-all-commands' is disabled!
   blacklisted-commands:
+    - 'crazyactions'
+    - 'ah sell'
+    - 'ah bid'
+    - 'pscale'
+    - 'spawn'
+    - 'market'
+    - 'tpaccept'
+    - 'tpa'
+    - 'tphere'
+    - 'marry'
     - 'heal'
     - 'eheal'
     - 'essentials:heal'
@@ -489,8 +506,8 @@ spectate:
 
   # If set to 'true', players spectating will receive invisibility effect.
   # NOTE: This option will not take effect if use-spectator-gamemode is set to true.
-  # default: true
-  add-invisibility-effect: true
+  # default: false
+  add-invisibility-effect: false
 
   # List of commands to allow while spectating.
   whitelisted-commands:

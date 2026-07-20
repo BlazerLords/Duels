@@ -19,7 +19,10 @@ public final class ArenaExplosionListener implements Listener {
     public void onEntityExplode(EntityExplodeEvent event) {
         ArenaExplosionService explosions = service.getExplosions();
         DestructibleArenaSession session = explosions.sessionFor(event.getEntity(), null, event.blockList());
-        if (session == null) return;
+        if (session == null) {
+            event.blockList().removeIf(block -> service.isDestructionDisabledAt(block.getLocation()));
+            return;
+        }
         if (!explosions.allow(session, event.getEntity(), null)) {
             event.setCancelled(true);
             return;
@@ -33,7 +36,10 @@ public final class ArenaExplosionListener implements Listener {
     public void onBlockExplode(BlockExplodeEvent event) {
         ArenaExplosionService explosions = service.getExplosions();
         DestructibleArenaSession session = explosions.sessionFor(null, event.getBlock(), event.blockList());
-        if (session == null) return;
+        if (session == null) {
+            event.blockList().removeIf(block -> service.isDestructionDisabledAt(block.getLocation()));
+            return;
+        }
         if (!explosions.allow(session, null, event.getBlock())) {
             event.setCancelled(true);
             return;

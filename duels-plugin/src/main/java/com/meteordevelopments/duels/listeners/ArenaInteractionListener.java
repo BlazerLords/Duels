@@ -24,6 +24,11 @@ public final class ArenaInteractionListener implements Listener {
         Block block = event.getClickedBlock();
         Block target = block.getRelative(event.getBlockFace());
         Material item = event.getItem() == null ? Material.AIR : event.getItem().getType();
+        if (service.isDestructionDisabled(event.getPlayer()) && isDestructiveInteraction(item, block.getType())) {
+            event.setCancelled(true);
+            event.getPlayer().sendMessage(StringUtil.color("&cРазрушаемые механики выключены для выбранного кита."));
+            return;
+        }
         if (item == Material.END_CRYSTAL || item == Material.TNT_MINECART || item == Material.MINECART) {
             DestructibleArenaSession playerSession = service.getRegistry().byPlayer(event.getPlayer());
             DestructibleArenaSession locationSession = service.getRegistry().at(target.getLocation());
@@ -53,5 +58,11 @@ public final class ArenaInteractionListener implements Listener {
             return;
         }
         new ArenaChangeTracker(session.getOriginalBlocks()).capture(block);
+    }
+
+    private boolean isDestructiveInteraction(final Material item, final Material block) {
+        return item == Material.END_CRYSTAL || item == Material.TNT_MINECART || item == Material.MINECART
+                || item == Material.FLINT_AND_STEEL || item.name().endsWith("_BUCKET")
+                || block == Material.RESPAWN_ANCHOR || block.name().endsWith("_BED");
     }
 }

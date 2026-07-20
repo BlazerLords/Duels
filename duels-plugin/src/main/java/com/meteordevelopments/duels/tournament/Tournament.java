@@ -2,11 +2,14 @@ package com.meteordevelopments.duels.tournament;
 
 import lombok.Getter;
 import lombok.Setter;
+import org.bukkit.inventory.ItemStack;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 @Getter
 @Setter
@@ -14,6 +17,7 @@ public class Tournament {
 
     private final String name;
     private final String kit;
+    private UUID id = UUID.randomUUID();
     private TournamentKitMode kitMode = TournamentKitMode.FIXED;
     private TournamentStatus status = TournamentStatus.CREATED;
     private int currentRound = 1;
@@ -30,6 +34,23 @@ public class Tournament {
     private String hologramDirection;
     private String reservedArena;
     private boolean reservedArenaWasDisabled;
+    private boolean playtimeRequirementEnabled;
+    private int requiredPlaytimeHours = 20;
+    private boolean entryFeeEnabled;
+    private double entryFeeAmount = 500D;
+    private boolean rewardsEnabled;
+    private TournamentRewardType rewardType = TournamentRewardType.ITEMS;
+    private BigDecimal fixedFirstReward = BigDecimal.ZERO;
+    private BigDecimal fixedSecondReward = BigDecimal.ZERO;
+    private BigDecimal fixedThirdReward = BigDecimal.ZERO;
+    private int firstRewardPercent = 60;
+    private int secondRewardPercent = 30;
+    private int thirdRewardPercent = 10;
+    private BigDecimal rewardFund = BigDecimal.ZERO;
+    private boolean rewardsFinalized;
+    private final Map<Integer, List<ItemStack>> itemRewards = new LinkedHashMap<>();
+    private final Map<UUID, TournamentPaymentRecord> paymentRecords = new LinkedHashMap<>();
+    private final Map<Integer, TournamentRewardDelivery> rewardDeliveries = new LinkedHashMap<>();
     private final List<String> players = new ArrayList<>();
     private final List<String> eliminatedPlayers = new ArrayList<>();
     private final List<String> allowedKits = new ArrayList<>();
@@ -39,6 +60,10 @@ public class Tournament {
     public Tournament(final String name, final String kit) {
         this.name = name;
         this.kit = kit;
+    }
+
+    public void setRewardFund(final BigDecimal rewardFund) {
+        this.rewardFund = TournamentRewardCalculator.nonNegative(rewardFund);
     }
 
     public TournamentMatch getMatch(final int round, final int match) {

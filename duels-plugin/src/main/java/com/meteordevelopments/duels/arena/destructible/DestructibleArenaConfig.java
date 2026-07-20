@@ -63,39 +63,39 @@ public class DestructibleArenaConfig {
 
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
-    public boolean isAllowBlockPlace() { return allowBlockPlace; }
+    public boolean isAllowBlockPlace() { return enabled && allowBlockPlace; }
     public void setAllowBlockPlace(boolean value) { allowBlockPlace = value; }
-    public boolean isAllowBlockBreak() { return allowBlockBreak; }
+    public boolean isAllowBlockBreak() { return enabled && allowBlockBreak; }
     public void setAllowBlockBreak(boolean value) { allowBlockBreak = value; }
-    public boolean isAllowExplosions() { return allowExplosions; }
+    public boolean isAllowExplosions() { return enabled && allowExplosions; }
     public void setAllowExplosions(boolean value) { allowExplosions = value; }
-    public boolean isAllowEndCrystals() { return allowEndCrystals; }
+    public boolean isAllowEndCrystals() { return enabled && allowEndCrystals; }
     public void setAllowEndCrystals(boolean value) { allowEndCrystals = value; }
-    public boolean isAllowRespawnAnchors() { return allowRespawnAnchors; }
+    public boolean isAllowRespawnAnchors() { return enabled && allowRespawnAnchors; }
     public void setAllowRespawnAnchors(boolean value) { allowRespawnAnchors = value; }
-    public boolean isAllowTntMinecarts() { return allowTntMinecarts; }
+    public boolean isAllowTntMinecarts() { return enabled && allowTntMinecarts; }
     public void setAllowTntMinecarts(boolean value) { allowTntMinecarts = value; }
-    public boolean isAllowTnt() { return allowTnt; }
+    public boolean isAllowTnt() { return enabled && allowTnt; }
     public void setAllowTnt(boolean value) { allowTnt = value; }
-    public boolean isAllowBedExplosions() { return allowBedExplosions; }
+    public boolean isAllowBedExplosions() { return enabled && allowBedExplosions; }
     public void setAllowBedExplosions(boolean value) { allowBedExplosions = value; }
-    public boolean isAllowCobwebs() { return allowCobwebs; }
+    public boolean isAllowCobwebs() { return enabled && allowCobwebs; }
     public void setAllowCobwebs(boolean value) { allowCobwebs = value; }
-    public boolean isAllowRails() { return allowRails; }
+    public boolean isAllowRails() { return enabled && allowRails; }
     public void setAllowRails(boolean value) { allowRails = value; }
-    public boolean isAllowLiquids() { return allowLiquids; }
+    public boolean isAllowLiquids() { return enabled && allowLiquids; }
     public void setAllowLiquids(boolean value) { allowLiquids = value; }
-    public boolean isAllowPistons() { return allowPistons; }
+    public boolean isAllowPistons() { return enabled && allowPistons; }
     public void setAllowPistons(boolean value) { allowPistons = value; }
-    public boolean isAllowFire() { return allowFire; }
+    public boolean isAllowFire() { return enabled && allowFire; }
     public void setAllowFire(boolean value) { allowFire = value; }
-    public boolean isSuppressBlockDrops() { return suppressBlockDrops; }
+    public boolean isSuppressBlockDrops() { return !enabled || suppressBlockDrops; }
     public void setSuppressBlockDrops(boolean value) { suppressBlockDrops = value; }
-    public boolean isSuppressEntityDrops() { return suppressEntityDrops; }
+    public boolean isSuppressEntityDrops() { return !enabled || suppressEntityDrops; }
     public void setSuppressEntityDrops(boolean value) { suppressEntityDrops = value; }
-    public boolean isCleanupEntities() { return cleanupEntities; }
+    public boolean isCleanupEntities() { return enabled && cleanupEntities; }
     public void setCleanupEntities(boolean value) { cleanupEntities = value; }
-    public boolean isRestoreAfterMatch() { return restoreAfterMatch; }
+    public boolean isRestoreAfterMatch() { return enabled && restoreAfterMatch; }
     public void setRestoreAfterMatch(boolean value) { restoreAfterMatch = value; }
     public Set<Material> getAllowedPlaceMaterials() { return allowedPlaceMaterials; }
     public void setAllowedPlaceMaterials(Set<Material> value) { allowedPlaceMaterials = copyOf(value); }

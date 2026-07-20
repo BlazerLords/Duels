@@ -69,6 +69,8 @@ public final class TournamentBracketService {
                 match.setPlayer1(null);
                 match.setPlayer2(null);
                 match.setWinner(null);
+                match.setSelectedKit(null);
+                match.setCompletedAt(0L);
                 match.setWaitingSince(0L);
                 match.setStatus(TournamentMatchStatus.WAITING);
             }

@@ -148,7 +148,7 @@ public class KitOptionsListener implements Listener {
                         // Pass the winner's current health for the death message
                         double winnerHealth = Math.ceil(winner.getHealth()) * 0.5;
                         if (plugin.getTournamentManager() != null && plugin.getTournamentManager().isTournamentMatch(match)) {
-                            plugin.getTournamentManager().sendTournamentDeathMessage(match, player, winner, winnerHealth);
+                            plugin.getTournamentManager().sendTournamentDeathMessage(match, player);
                         } else {
                             arena.broadcast(plugin.getLang().getMessage("DUEL.on-death.with-killer",
                                     "name", player.getName(),

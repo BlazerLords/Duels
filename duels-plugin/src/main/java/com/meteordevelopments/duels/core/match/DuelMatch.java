@@ -12,6 +12,7 @@ import com.meteordevelopments.duels.core.arena.ArenaImpl;
 import com.meteordevelopments.duels.core.kit.KitImpl;
 import com.meteordevelopments.duels.party.PartyManagerImpl;
 import com.meteordevelopments.duels.core.queue.Queue;
+import com.meteordevelopments.duels.hook.hooks.worldguard.WorldGuardHandler;
 import org.bukkit.Location;
 import org.bukkit.block.Block;
 import org.bukkit.block.data.BlockData;
@@ -60,6 +61,7 @@ public class DuelMatch implements Match {
     // Default value for players is false, which is set to true if player is killed in the match.
     private final Map<Player, Boolean> players = new HashMap<>();
     private final Map<UUID, Location> spawnPoints = new HashMap<>();
+    private final Map<WorldGuardAccessKey, WorldGuardHandler.BypassState> worldGuardAccess = new LinkedHashMap<>();
 
     public DuelMatch(final DuelsPlugin plugin, final ArenaImpl arena, final KitImpl kit, final Map<UUID, List<ItemStack>> items, final int bet, final Queue source) {
         this.partyManager = plugin.getPartyManager();
@@ -140,6 +142,13 @@ public class DuelMatch implements Match {
 
     public Location getSpawnPoint(Player player) {
         return spawnPoints.get(player.getUniqueId());
+    }
+
+    public Map<WorldGuardAccessKey, WorldGuardHandler.BypassState> getWorldGuardAccess() {
+        return worldGuardAccess;
+    }
+
+    public record WorldGuardAccessKey(UUID playerId, UUID worldId) {
     }
 
     public void markAsDead(final Player player) {

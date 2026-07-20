@@ -4,8 +4,10 @@ import com.meteordevelopments.duels.DuelsPlugin;
 import com.meteordevelopments.duels.config.Config;
 import org.bukkit.entity.Player;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.lang.reflect.Field;
+import java.nio.file.Path;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -18,6 +20,9 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 class PlayerInfoManagerTest {
+    @TempDir
+    Path tempDir;
+
     @Test
     void failedRestoreRetainsSnapshotForRetry() throws Exception {
         PlayerInfoManager manager = manager();
@@ -91,6 +96,7 @@ class PlayerInfoManagerTest {
     private PlayerInfoManager manager() {
         DuelsPlugin plugin = mock(DuelsPlugin.class);
         when(plugin.getConfiguration()).thenReturn(mock(Config.class));
+        when(plugin.getDataFolder()).thenReturn(tempDir.toFile());
         return new PlayerInfoManager(plugin);
     }
 

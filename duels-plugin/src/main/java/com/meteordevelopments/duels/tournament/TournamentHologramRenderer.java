@@ -3,6 +3,9 @@ package com.meteordevelopments.duels.tournament;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.math.BigDecimal;
+import java.text.DecimalFormat;
+import java.text.DecimalFormatSymbols;
 
 /** Builds tournament hologram text without performing Bukkit or CMI operations. */
 public final class TournamentHologramRenderer {
@@ -14,6 +17,9 @@ public final class TournamentHologramRenderer {
         lines.add("");
         lines.add("&7Участников: &f" + tournament.getPlayers().size());
         lines.add("&7Осталось: &f" + countRemainingPlayers(tournament));
+        if (showPrizeFund(tournament) && tournament.getStatus() != TournamentStatus.FINISHED) {
+            lines.add("&6Призовой фонд: &f" + money(prizeFund(tournament)) + " ₽");
+        }
         lines.add("");
         lines.add("&7Статус: " + formatActivityStatus(tournament));
         lines.add("&7Текущий раунд: &f" + roundName(tournament, tournament.getCurrentRound()));
@@ -49,19 +55,16 @@ public final class TournamentHologramRenderer {
             lines.add("&6&lТурнир завершён");
             lines.add("");
             lines.add(results.first() == null ? "&eПобедитель не определён" : "&eПобедитель: &f" + displayName(results.first()));
-            lines.add("");
-            lines.add("&7Активных матчей нет");
             return trim(lines, maxLines);
         }
         lines.add("&c&lАктивные матчи");
         lines.add("");
         List<TournamentMatch> matches = tournament.getMatches().values().stream()
                 .flatMap(round -> round.values().stream())
-                .filter(this::isVisibleActiveMatch)
-                .sorted(Comparator.comparingInt(this::activeWeight)
-                        .thenComparingInt(TournamentMatch::getRound)
+                .filter(match -> match.getStatus() == TournamentMatchStatus.IN_PROGRESS)
+                .sorted(Comparator.comparingInt(TournamentMatch::getRound)
                         .thenComparingInt(TournamentMatch::getNumber))
-                .limit(Math.max(1, maxLines / 2))
+                .limit(3)
                 .toList();
         if (matches.isEmpty()) {
             lines.add("&7Нет активных матчей");
@@ -81,32 +84,37 @@ public final class TournamentHologramRenderer {
     public List<String> buildNext(Tournament tournament, int maxLines, boolean showByeMatches) {
         if (tournament.getStatus() == TournamentStatus.FINISHED) {
             List<String> lines = new ArrayList<>();
-            lines.add("&6&lИтоги турнира");
+            lines.add("&6&lИТОГИ ТУРНИРА");
+            lines.add("&6&l━━━━━━━━━━━━");
             lines.add("");
-            lines.addAll(buildPlacement(tournament));
+            lines.addAll(buildLargePlacement(tournament));
             return trim(lines, maxLines);
         }
 
         List<String> lines = new ArrayList<>();
         int round = resolvePreviewRound(tournament);
-        lines.add(isFinalStage(tournament) ? "&6&lФинальная стадия" : "&6&lСледующий раунд");
+        lines.add("&6&lСледующие раунды");
         lines.add("");
         if (round <= 0 || tournament.getRoundMatches(round).isEmpty()) {
             lines.add("&7Ожидает игроков");
             return trim(lines, maxLines);
         }
-        for (TournamentMatch match : tournament.getRoundMatches(round)) {
-            if (!showByeMatches && match.getStatus() == TournamentMatchStatus.BYE) {
-                continue;
-            }
+        List<TournamentMatch> upcoming = tournament.getRoundMatches(round).stream()
+                .filter(TournamentMatch::isKnown)
+                .filter(match -> match.getStatus() == TournamentMatchStatus.READY
+                        || match.getStatus() == TournamentMatchStatus.STARTING
+                        || match.getStatus() == TournamentMatchStatus.WAITING_PLAYER)
+                .filter(match -> showByeMatches || match.getStatus() != TournamentMatchStatus.BYE)
+                .sorted(Comparator.comparingInt(TournamentMatch::getNumber))
+                .limit(3)
+                .toList();
+        if (upcoming.isEmpty()) {
+            lines.add("&7Ожидает формирования пар");
+            return trim(lines, maxLines);
+        }
+        for (TournamentMatch match : upcoming) {
             lines.add("&e" + roundName(tournament, match.getRound()) + " #" + match.getNumber());
-            if (match.isKnown()) {
-                lines.add("&f" + participantName(match.getPlayer1()));
-                lines.add("&7vs");
-                lines.add("&f" + participantName(match.getPlayer2()));
-            } else {
-                lines.add("&7Ожидает игроков");
-            }
+            lines.add("&f" + participantName(match.getPlayer1()) + " &7vs &f" + participantName(match.getPlayer2()));
             lines.add("");
         }
         return trim(lines, maxLines);
@@ -167,11 +175,33 @@ public final class TournamentHologramRenderer {
             lines.add("&eПобедитель не определён");
             return lines;
         }
-        lines.add("&e1 место: &f" + displayName(results.first()));
+        lines.add(placementLine(tournament, 1, results.first(), "&e1 место: &f"));
         if (results.second() != null) {
-            lines.add("&e2 место: &f" + displayName(results.second()));
+            lines.add(placementLine(tournament, 2, results.second(), "&e2 место: &f"));
         }
-        lines.add(results.third() == null ? "&e3 место: &7не определено" : "&e3 место: &f" + displayName(results.third()));
+        lines.add(results.third() == null ? "&e3 место: &7не определено"
+                : placementLine(tournament, 3, results.third(), "&e3 место: &f"));
+        return lines;
+    }
+
+    private List<String> buildLargePlacement(Tournament tournament) {
+        TournamentResults results = results(tournament);
+        if (results.first() == null) {
+            return List.of("&e&lПобедитель не определён");
+        }
+        List<String> lines = new ArrayList<>();
+        lines.add("&e&l1 МЕСТО");
+        lines.add("&f&l" + displayName(results.first()) + rewardSuffix(tournament, 1));
+        if (results.second() != null) {
+            lines.add("");
+            lines.add("&7&l2 МЕСТО");
+            lines.add("&f" + displayName(results.second()) + rewardSuffix(tournament, 2));
+        }
+        if (results.third() != null) {
+            lines.add("");
+            lines.add("&6&l3 МЕСТО");
+            lines.add("&f" + displayName(results.third()) + rewardSuffix(tournament, 3));
+        }
         return lines;
     }
 
@@ -194,26 +224,15 @@ public final class TournamentHologramRenderer {
     }
 
     private int resolvePreviewRound(Tournament tournament) {
-        if (tournament.getRoundMatches(tournament.getCurrentRound()).stream().anyMatch(this::isVisibleActiveMatch)) {
-            return tournament.getCurrentRound();
-        }
-        int nextRound = tournament.getCurrentRound() + 1;
-        if (tournament.getMatches().containsKey(nextRound)) {
-            return nextRound;
-        }
-        return tournament.getMatches().containsKey(tournament.getCurrentRound()) ? tournament.getCurrentRound() : -1;
-    }
-
-    private boolean isVisibleActiveMatch(TournamentMatch match) {
-        return match.getStatus().isPending();
-    }
-
-    private int activeWeight(TournamentMatch match) {
-        return switch (match.getStatus()) {
-            case READY, STARTING, WAITING_PLAYER -> 0;
-            case IN_PROGRESS -> 1;
-            default -> 2;
-        };
+        return tournament.getMatches().entrySet().stream()
+                .sorted(java.util.Map.Entry.comparingByKey())
+                .filter(entry -> entry.getValue().values().stream().anyMatch(match -> match.isKnown()
+                        && (match.getStatus() == TournamentMatchStatus.READY
+                        || match.getStatus() == TournamentMatchStatus.STARTING
+                        || match.getStatus() == TournamentMatchStatus.WAITING_PLAYER)))
+                .map(java.util.Map.Entry::getKey)
+                .findFirst()
+                .orElse(-1);
     }
 
     public String formatActivityStatus(Tournament tournament) {
@@ -260,6 +279,37 @@ public final class TournamentHologramRenderer {
 
     private String displayName(String name) {
         return name == null || name.isBlank() ? "Ожидание игрока" : name;
+    }
+
+    private boolean showPrizeFund(final Tournament tournament) {
+        return tournament.isRewardsEnabled() && tournament.getRewardType() != TournamentRewardType.ITEMS;
+    }
+
+    private BigDecimal prizeFund(final Tournament tournament) {
+        if (tournament.getRewardType() == TournamentRewardType.ENTRY_FEE_POOL) {
+            return TournamentRewardCalculator.nonNegative(tournament.getRewardFund());
+        }
+        return TournamentRewardCalculator.total(List.of(tournament.getFixedFirstReward(),
+                tournament.getFixedSecondReward(), tournament.getFixedThirdReward()));
+    }
+
+    private String placementLine(final Tournament tournament, final int place, final String player, final String prefix) {
+        return prefix + displayName(player) + rewardSuffix(tournament, place);
+    }
+
+    private String rewardSuffix(final Tournament tournament, final int place) {
+        if (!showPrizeFund(tournament)) return "";
+        final TournamentRewardDelivery delivery = tournament.getRewardDeliveries().get(place);
+        if (delivery == null) return "";
+        return " &7— &a" + money(delivery.getAmount()) + " ₽";
+    }
+
+    private String money(final BigDecimal amount) {
+        final DecimalFormatSymbols symbols = new DecimalFormatSymbols(java.util.Locale.ROOT);
+        symbols.setGroupingSeparator(' ');
+        symbols.setDecimalSeparator(',');
+        final DecimalFormat format = new DecimalFormat("#,##0.##", symbols);
+        return format.format(TournamentRewardCalculator.nonNegative(amount));
     }
 
     private List<String> trim(List<String> lines, int maxLines) {

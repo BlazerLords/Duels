@@ -25,6 +25,8 @@ import org.bukkit.profile.PlayerProfile;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.text.DecimalFormat;
+import java.text.DecimalFormatSymbols;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -42,6 +44,7 @@ public class TournamentNpcListener implements Listener {
     private static final int UNREGISTER_HEAD_ID = 30154;
     private static final int RULES_HEAD_ID = 281;
     private static final int SPECTATE_HEAD_ID = 108522;
+    private static final DecimalFormat MONEY_FORMAT = new DecimalFormat("0.##", DecimalFormatSymbols.getInstance(Locale.US));
     private static final Map<Integer, String> HEAD_TEXTURES = Map.of(
             TROPHY_HEAD_ID, "f97e2c8b8276276e38deca8850872d59ecc9c1f38f2adce40858edb9e634d7ba",
             UNREGISTER_HEAD_ID, "47e50591f4118b9ae44755f7b485699b4b917f00d65f5ea8553ee48826d234c7",
@@ -191,6 +194,17 @@ public class TournamentNpcListener implements Listener {
             case NOT_FOUND -> message(player, "&cТурнир не найден.");
             case LOCKED -> message(player, lockedRegistrationMessage(target));
             case ALREADY_ADDED -> message(player, "&eВы уже зарегистрированы на этот турнир.");
+            case NOT_ENOUGH_PLAYTIME -> {
+                final int required = target == null ? 0 : target.getRequiredPlaytimeHours();
+                final int current = plugin.getTournamentManager().getPlaytimeHours(player);
+                message(player, "&cДля регистрации нужно минимум &f" + required + " ч &cонлайна. У вас: &f" + current + " ч&c.");
+            }
+            case ECONOMY_UNAVAILABLE -> message(player, "&cЭкономика сервера недоступна, регистрация со взносом временно невозможна.");
+            case NOT_ENOUGH_MONEY -> {
+                final String amount = target == null ? "0" : formatMoney(target.getEntryFeeAmount());
+                message(player, "&cДля регистрации нужен взнос &f" + amount + "&c. Недостаточно средств.");
+            }
+            case ECONOMY_WITHDRAW_FAILED -> message(player, "&cНе удалось списать взнос. Сообщите администрации.");
             case ALREADY_IN_OTHER_TOURNAMENT -> {
                 final Tournament activeTournament = plugin.getTournamentManager().getPlayerOpenTournament(player.getName());
                 message(player, activeTournament == null
@@ -315,6 +329,12 @@ public class TournamentNpcListener implements Listener {
             case IN_PROGRESS -> "&cТурнир уже начался, регистрация закрыта.";
             case CREATED -> "&cРегистрация уже закрыта.";
         };
+    }
+
+    private String formatMoney(final double amount) {
+        synchronized (MONEY_FORMAT) {
+            return MONEY_FORMAT.format(amount);
+        }
     }
 
     private TournamentMatch findVisibleMatch(final Tournament tournament, final String player) {

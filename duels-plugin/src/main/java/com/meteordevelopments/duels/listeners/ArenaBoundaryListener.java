@@ -19,6 +19,10 @@ public final class ArenaBoundaryListener implements Listener {
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onFlow(BlockFromToEvent event) {
+        if (disabled(event.getBlock()) || disabled(event.getToBlock())) {
+            event.setCancelled(true);
+            return;
+        }
         DestructibleArenaSession session = resolve(event.getBlock(), event.getToBlock());
         if (session == null) return;
         if (!session.getConfig().isAllowLiquids() || !session.getBounds().contains(event.getBlock())
@@ -33,6 +37,10 @@ public final class ArenaBoundaryListener implements Listener {
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onPistonExtend(BlockPistonExtendEvent event) {
+        if (disabledPiston(event.getBlock(), event.getBlocks(), event.getDirection())) {
+            event.setCancelled(true);
+            return;
+        }
         DestructibleArenaSession session = pistonSession(event.getBlock(), event.getBlocks(), event.getDirection());
         if (session == null) return;
         if (!session.getConfig().isAllowPistons() || event.getBlocks().stream()
@@ -53,6 +61,10 @@ public final class ArenaBoundaryListener implements Listener {
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onPistonRetract(BlockPistonRetractEvent event) {
         org.bukkit.block.BlockFace movement = event.getDirection().getOppositeFace();
+        if (disabledPiston(event.getBlock(), event.getBlocks(), movement)) {
+            event.setCancelled(true);
+            return;
+        }
         DestructibleArenaSession session = pistonSession(event.getBlock(), event.getBlocks(), movement);
         if (session == null) return;
         if (!session.getConfig().isAllowPistons() || event.getBlocks().stream()
@@ -78,6 +90,10 @@ public final class ArenaBoundaryListener implements Listener {
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onSpread(BlockSpreadEvent event) {
+        if (disabled(event.getSource()) || disabled(event.getBlock())) {
+            event.setCancelled(true);
+            return;
+        }
         DestructibleArenaSession session = resolve(event.getSource(), event.getBlock());
         if (session == null) return;
         if (!session.getConfig().isAllowFire() || !session.getBounds().contains(event.getBlock())) {
@@ -89,6 +105,10 @@ public final class ArenaBoundaryListener implements Listener {
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onEntityChange(EntityChangeBlockEvent event) {
+        if (disabled(event.getBlock())) {
+            event.setCancelled(true);
+            return;
+        }
         DestructibleArenaSession session = service.getRegistry().at(event.getBlock().getLocation());
         if (session == null) session = service.getRegistry().byEntity(event.getEntity());
         if (session == null) return;
@@ -102,6 +122,11 @@ public final class ArenaBoundaryListener implements Listener {
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onGrow(StructureGrowEvent event) {
+        if (service.isDestructionDisabledAt(event.getLocation())
+                || event.getBlocks().stream().anyMatch(state -> disabled(state.getBlock()))) {
+            event.setCancelled(true);
+            return;
+        }
         DestructibleArenaSession session = service.getRegistry().at(event.getLocation());
         if (session != null && event.getBlocks().stream().anyMatch(state -> !session.getBounds().contains(state.getBlock()))) {
             event.setCancelled(true);
@@ -112,6 +137,10 @@ public final class ArenaBoundaryListener implements Listener {
     }
 
     private void protectFire(Block block, org.bukkit.event.Cancellable event) {
+        if (disabled(block)) {
+            event.setCancelled(true);
+            return;
+        }
         DestructibleArenaSession session = service.getRegistry().at(block.getLocation());
         if (session == null) return;
         if (!session.getConfig().isAllowFire() || !session.getBounds().contains(block)) {
@@ -134,5 +163,15 @@ public final class ArenaBoundaryListener implements Listener {
             if (session != null) return session;
         }
         return service.getRegistry().at(piston.getRelative(movement).getLocation());
+    }
+
+    private boolean disabled(final Block block) {
+        return block != null && service.isDestructionDisabledAt(block.getLocation());
+    }
+
+    private boolean disabledPiston(final Block piston, final java.util.List<Block> blocks,
+                                   final org.bukkit.block.BlockFace movement) {
+        return disabled(piston) || disabled(piston.getRelative(movement)) || blocks.stream()
+                .anyMatch(block -> disabled(block) || disabled(block.getRelative(movement)));
     }
 }

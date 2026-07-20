@@ -17,6 +17,7 @@ public final class ArenaRestoreService {
     private long budgetTick = Long.MIN_VALUE;
     private int blocksRestoredThisTick;
     private long nanosUsedThisTick;
+    private java.util.function.Consumer<DestructibleArenaSession> beforeRestore = session -> { };
     private Runnable completion = () -> { };
 
     public ArenaRestoreService(DuelsPlugin plugin, DestructibleArenaSessionRegistry registry) {
@@ -30,6 +31,10 @@ public final class ArenaRestoreService {
 
     public boolean restore(DestructibleArenaSession session) {
         if (session == null || session.getState() == SessionState.RESTORING || session.getState() == SessionState.READY) return false;
+        // Bukkit rejects new tasks during plugin disable. Keep the session active so the
+        // final recovery snapshot can restore it after the next server startup.
+        if (!plugin.isEnabled()) return true;
+        beforeRestore.accept(session);
         session.setState(SessionState.FINISHING);
         if (session.getConfig().isCleanupEntities()) {
             for (java.util.UUID entityId : session.getTrackedEntities()) {
@@ -49,6 +54,10 @@ public final class ArenaRestoreService {
 
     public void setCompletion(Runnable completion) {
         this.completion = completion == null ? () -> { } : completion;
+    }
+
+    public void setBeforeRestore(java.util.function.Consumer<DestructibleArenaSession> beforeRestore) {
+        this.beforeRestore = beforeRestore == null ? session -> { } : beforeRestore;
     }
 
     private final class BukkitTaskRunner extends BukkitRunnable {

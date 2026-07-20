@@ -1,5 +1,6 @@
 package com.meteordevelopments.duels.arena.destructible;
 
+import com.meteordevelopments.duels.hook.hooks.worldguard.WorldGuardHandler;
 import org.bukkit.scheduler.BukkitTask;
 
 import java.util.LinkedHashMap;
@@ -20,6 +21,7 @@ public class DestructibleArenaSession {
     private final Map<BlockPosition, StoredBlockState> originalBlocks = new LinkedHashMap<>();
     private final Set<UUID> trackedEntities = new LinkedHashSet<>();
     private final Set<UUID> players = new LinkedHashSet<>();
+    private final Map<WorldGuardBypassKey, WorldGuardHandler.BypassState> worldGuardBypasses = new LinkedHashMap<>();
     private final long startedAt = System.currentTimeMillis();
     private BukkitTask restoreTask;
     private int restoredBlocks;
@@ -46,10 +48,14 @@ public class DestructibleArenaSession {
     public Map<BlockPosition, StoredBlockState> getOriginalBlocks() { return originalBlocks; }
     public Set<UUID> getTrackedEntities() { return trackedEntities; }
     public Set<UUID> getPlayers() { return players; }
+    public Map<WorldGuardBypassKey, WorldGuardHandler.BypassState> getWorldGuardBypasses() { return worldGuardBypasses; }
     public long getStartedAt() { return startedAt; }
     public BukkitTask getRestoreTask() { return restoreTask; }
     public void setRestoreTask(BukkitTask restoreTask) { this.restoreTask = restoreTask; }
     public int getRestoredBlocks() { return restoredBlocks; }
     public void incrementRestoredBlocks() { restoredBlocks++; }
     public boolean isActive() { return state == SessionState.ACTIVE; }
+
+    public record WorldGuardBypassKey(UUID playerId, UUID worldId) {
+    }
 }

@@ -9,8 +9,11 @@ import com.meteordevelopments.duels.util.config.AbstractConfiguration;
 import org.bukkit.Sound;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 
+import java.io.File;
+import java.io.IOException;
 import java.util.*;
 
 public class Config extends AbstractConfiguration<DuelsPlugin> {
@@ -447,7 +450,7 @@ public class Config extends AbstractConfiguration<DuelsPlugin> {
 
         specRequiresClearedInventory = configuration.getBoolean("spectate.requires-cleared-inventory", false);
         specUseSpectatorGamemode = configuration.getBoolean("spectate.use-spectator-gamemode", false);
-        specAddInvisibilityEffect = configuration.getBoolean("spectate.add-invisibility-effect", true);
+        specAddInvisibilityEffect = configuration.getBoolean("spectate.add-invisibility-effect", false);
         specHideJoinMessageFromFighters = configuration.getBoolean("spectate.hide-join-message-from-fighters", false);
         specWhitelistedCommands = configuration.getStringList("spectate.whitelisted-commands");
 
@@ -548,6 +551,52 @@ public class Config extends AbstractConfiguration<DuelsPlugin> {
 
             }
         }
+    }
+
+    public synchronized boolean addBlacklistedCommand(final String command) {
+        final String normalized = normalizeCommandRule(command);
+        if (normalized.isEmpty() || blacklistedCommands.stream().anyMatch(value -> value.equalsIgnoreCase(normalized))) {
+            return false;
+        }
+        final List<String> updated = new ArrayList<>(blacklistedCommands);
+        updated.add(normalized);
+        return saveCommandRules(updated, blockAllCommands);
+    }
+
+    public synchronized boolean removeBlacklistedCommand(final String command) {
+        final String normalized = normalizeCommandRule(command);
+        final List<String> updated = new ArrayList<>(blacklistedCommands);
+        if (!updated.removeIf(value -> value.equalsIgnoreCase(normalized))) {
+            return false;
+        }
+        return saveCommandRules(updated, blockAllCommands);
+    }
+
+    public synchronized boolean setCommandLockdown(final boolean enabled) {
+        return blockAllCommands == enabled || saveCommandRules(new ArrayList<>(blacklistedCommands), enabled);
+    }
+
+    private boolean saveCommandRules(final List<String> blacklist, final boolean lockdown) {
+        final File file = new File(plugin.getDataFolder(), "config.yml");
+        final YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file);
+        yaml.set("duel.blacklisted-commands", blacklist);
+        yaml.set("duel.block-all-commands", lockdown);
+        try {
+            yaml.save(file);
+        } catch (IOException ex) {
+            plugin.getLogger().severe("Could not save duel command rules: " + ex.getMessage());
+            return false;
+        }
+        blacklistedCommands = blacklist;
+        blockAllCommands = lockdown;
+        return true;
+    }
+
+    private String normalizeCommandRule(final String command) {
+        if (command == null) {
+            return "";
+        }
+        return command.trim().toLowerCase(Locale.ROOT).replaceFirst("^/+", "").replaceAll("\\s+", " ");
     }
 
     public void playSound(final Player player, final String message) {

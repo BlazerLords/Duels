@@ -223,6 +223,7 @@ public class DuelsPlugin extends JavaPlugin implements Duels, LogSource {
                 .forEach(listener -> HandlerList.unregisterAll(listener.getListener()));
         commands.clear();
 
+        boolean successful = true;
         for (final Loadable loadable : Lists.reverse(loadables)) {
             final String name = loadable.getClass().getSimpleName();
 
@@ -236,12 +237,13 @@ public class DuelsPlugin extends JavaPlugin implements Duels, LogSource {
                 loadable.handleUnload();
                 logManager.debug(name + " has been unloaded. (took " + (System.currentTimeMillis() - now) + "ms)");
             } catch (Exception ex) {
+                successful = false;
+                LOGGER.log(Level.SEVERE, "Error unloading " + name, ex);
                 sendMessage("&c&lThere was an error while unloading " + name + "! If you believe this is an issue from the plugin, please contact the developer.");
-                return false;
             }
         }
 
-        return true;
+        return successful;
     }
 
     private void unregisterPluginCommands() {
@@ -762,6 +764,7 @@ public class DuelsPlugin extends JavaPlugin implements Duels, LogSource {
         registerListener(new ArenaBlockListener(this));
         registerListener(new ArenaExplosionListener(this));
         registerListener(new ArenaInteractionListener(this));
+        registerListener(new SpectatorProtectionListener(this));
         registerListener(new ArenaEntityListener(this));
         registerListener(new ArenaBoundaryListener(this));
         new KitEditManager(this);

@@ -7,7 +7,10 @@ import com.meteordevelopments.duels.config.CommandsConfig.CommandSettings;
 import com.meteordevelopments.duels.tournament.Tournament;
 import com.meteordevelopments.duels.tournament.TournamentKitMode;
 import com.meteordevelopments.duels.tournament.TournamentManager;
+import com.meteordevelopments.duels.tournament.TournamentMatch;
+import com.meteordevelopments.duels.tournament.TournamentMatchStatus;
 import com.meteordevelopments.duels.tournament.TournamentStatus;
+import com.meteordevelopments.duels.tournament.TournamentRewardType;
 import com.meteordevelopments.duels.util.StringUtil;
 import com.github.thesilentpro.headdb.api.HeadAPI;
 import com.github.thesilentpro.headdb.api.model.Head;
@@ -25,13 +28,16 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.AsyncPlayerChatEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 
 import java.util.ArrayList;
+import java.math.BigDecimal;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -47,6 +53,10 @@ public class TournamentCommand extends BaseCommand implements Listener {
     private final Map<Integer, ItemStack> headDbItems = new ConcurrentHashMap<>();
     private final Map<UUID, String> pendingConfirmations = new ConcurrentHashMap<>();
     private final Map<UUID, String> pendingNpcBindings = new ConcurrentHashMap<>();
+    private final Map<UUID, PendingRegistrationSettingInput> pendingRegistrationInputs = new ConcurrentHashMap<>();
+    private final Map<UUID, PendingRewardSettingInput> pendingRewardInputs = new ConcurrentHashMap<>();
+    private final Map<String, UUID> rewardEditors = new ConcurrentHashMap<>();
+    private final Set<UUID> tournamentMenuSessions = ConcurrentHashMap.newKeySet();
 
     private static final int TROPHY_HEAD_ID = 42035;
     private static final int CANCEL_HEAD_ID = 30154;
@@ -150,6 +160,9 @@ public class TournamentCommand extends BaseCommand implements Listener {
                 break;
             case "replay":
                 replay(sender, args);
+                break;
+            case "rewardretry":
+                rewardRetry(sender, args);
                 break;
             case "holo":
                 holo(sender, args);
@@ -354,6 +367,19 @@ public class TournamentCommand extends BaseCommand implements Listener {
             case NOT_FOUND -> message(sender, "&cТурнир не найден.");
             case LOCKED -> message(sender, "&cРегистрация уже закрыта.");
             case ALREADY_ADDED -> message(sender, "&eВы уже зарегистрированы на этот турнир.");
+            case NOT_ENOUGH_PLAYTIME -> {
+                final Tournament tournament = tournamentManager.getTournament(args[1]);
+                final int required = tournament == null ? 0 : tournament.getRequiredPlaytimeHours();
+                final int current = tournamentManager.getPlaytimeHours(player);
+                message(sender, "&cДля регистрации нужно минимум &f" + required + " ч &cонлайна. У вас: &f" + current + " ч&c.");
+            }
+            case ECONOMY_UNAVAILABLE -> message(sender, "&cЭкономика сервера недоступна, регистрация со взносом временно невозможна.");
+            case NOT_ENOUGH_MONEY -> {
+                final Tournament tournament = tournamentManager.getTournament(args[1]);
+                final String amount = tournament == null ? "0" : formatMoney(tournament.getEntryFeeAmount());
+                message(sender, "&cДля регистрации нужен взнос &f" + amount + "&c. Недостаточно средств.");
+            }
+            case ECONOMY_WITHDRAW_FAILED -> message(sender, "&cНе удалось списать взнос. Сообщите администрации.");
             case ALREADY_IN_OTHER_TOURNAMENT -> {
                 final Tournament activeTournament = tournamentManager.getPlayerOpenTournament(player.getName());
                 message(sender, activeTournament == null
@@ -387,7 +413,9 @@ public class TournamentCommand extends BaseCommand implements Listener {
             message(sender, "&cИспользование: /tour remove <турнир> <ник>");
             return;
         }
-        message(sender, tournamentManager.removePlayer(args[1], args[2]) ? "&aИгрок удалён." : "&cНе удалось удалить игрока.");
+        message(sender, tournamentManager.removePlayer(args[1], args[2])
+                ? "&aИгрок исключён из турнира. Его текущий матч завершён техническим поражением."
+                : "&cНе удалось исключить игрока.");
     }
 
     private void start(final CommandSender sender, final String[] args) {
@@ -436,13 +464,23 @@ public class TournamentCommand extends BaseCommand implements Listener {
             message(sender, "&cИспользование: /tour reset <турнир>");
             return;
         }
+        final Tournament tournament = tournamentManager.getTournament(args[1]);
+        if (tournament == null) {
+            message(sender, "&cТурнир не найден.");
+            return;
+        }
+        if (tournamentManager.hasPendingRewards(tournament)) {
+            message(sender, "&cСетку нельзя сбросить: не все награды турнира выданы.");
+            return;
+        }
         if (tournamentManager.reset(args[1])) {
             successBlock(sender, "Турнир возвращён в регистрацию", List.of(
                     "&7Название: &e" + args[1],
-                    "&7Участники сохранены, сетка очищена.",
+                    "&7Сетка и список участников очищены.",
+                    "&7Игрокам необходимо зарегистрироваться заново.",
                     "&7Запуск: &f/tour start " + args[1]));
         } else {
-            message(sender, "&cТурнир не найден.");
+            message(sender, "&cНе удалось сбросить сетку турнира.");
         }
     }
 
@@ -489,7 +527,7 @@ public class TournamentCommand extends BaseCommand implements Listener {
             case PLAYER_OFFLINE -> message(sender, "&eОдин игрок оффлайн. Матч ожидает игрока.");
             case BOTH_OFFLINE -> message(sender, "&eОба игрока оффлайн. Матч ожидает игроков.");
             case NO_KIT -> message(sender, "&cКит турнира не найден.");
-            case NO_ARENA -> message(sender, "&cНет свободной разрешённой арены для этого турнира и кита.");
+            case NO_ARENA -> sendNoArenaDiagnostics(sender, args[2]);
             case DUEL_REJECTED -> message(sender, "&cDuels не смог запустить матч. Проверь арену/валидаторы.");
             case STARTING -> message(sender, "&eМатч уже запускается.");
             case ALREADY_RUNNING -> message(sender, "&cМатч уже идёт.");
@@ -541,7 +579,7 @@ public class TournamentCommand extends BaseCommand implements Listener {
                 message(sender, "&eОба игрока оффлайн. Матч переведен в ожидание игроков.");
             }
             case NO_KIT -> message(sender, "&cКит турнира не найден: &f" + next.kit());
-            case NO_ARENA -> message(sender, "&cНет свободной разрешённой арены для этого турнира и кита.");
+            case NO_ARENA -> sendNoArenaDiagnostics(sender, next.tournament());
             case DUEL_REJECTED -> message(sender, "&cDuels не смог запустить матч. Проверь арену/валидаторы.");
             case STARTING -> {
                 sendNextMatchHeader(sender, next);
@@ -558,6 +596,10 @@ public class TournamentCommand extends BaseCommand implements Listener {
         }
     }
 
+    private void sendNoArenaDiagnostics(final CommandSender sender, final String tournamentName) {
+        tournamentManager.describeArenaAvailability(tournamentName).forEach(line -> message(sender, line));
+    }
+
     private void myMatch(final CommandSender sender) {
         if (!(sender instanceof Player player)) {
             message(sender, "&cЭта команда доступна только игроку.");
@@ -572,6 +614,7 @@ public class TournamentCommand extends BaseCommand implements Listener {
             return;
         }
         if (!has(player, Permissions.TOURNAMENT_ADMIN)) return;
+        tournamentMenuSessions.remove(player.getUniqueId());
         openTournamentList(player);
     }
 
@@ -581,6 +624,7 @@ public class TournamentCommand extends BaseCommand implements Listener {
             return;
         }
         if (player.hasPermission(Permissions.TOURNAMENT_ADMIN)) {
+            tournamentMenuSessions.add(player.getUniqueId());
             openTournamentList(player);
             return;
         }
@@ -624,8 +668,16 @@ public class TournamentCommand extends BaseCommand implements Listener {
 
     private void replay(final CommandSender sender, final String[] args) {
         if (!has(sender, Permissions.TOURNAMENT_REPLAY)) return;
+        if (args.length < 2) {
+            message(sender, "&cИспользование: /tour replay <турнир> [раунд] [матч]");
+            return;
+        }
+        if (args.length == 2) {
+            sendReplayResult(sender, tournamentManager.replayLatestMatch(args[1]));
+            return;
+        }
         if (args.length < 4) {
-            message(sender, "&cИспользование: /tour replay <турнир> <раунд> <матч>");
+            message(sender, "&cУкажите и раунд, и номер матча либо только название турнира.");
             return;
         }
         final int round = parsePositive(args[2]);
@@ -634,11 +686,33 @@ public class TournamentCommand extends BaseCommand implements Listener {
             message(sender, "&cРаунд и матч должны быть числами.");
             return;
         }
-        switch (tournamentManager.replayMatch(args[1], round, match)) {
+        sendReplayResult(sender, tournamentManager.replayMatch(args[1], round, match));
+    }
+
+    private void sendReplayResult(final CommandSender sender, final TournamentManager.ReplayResult result) {
+        switch (result) {
             case SUCCESS -> message(sender, "&aМатч возвращён на переигровку. Следующие раунды пересобраны.");
             case NOT_FOUND -> message(sender, "&cТурнир не найден.");
             case NO_MATCH -> message(sender, "&cМатч не найден.");
             case NOT_READY -> message(sender, "&cЭтот матч нельзя переиграть.");
+        }
+    }
+
+    private void rewardRetry(final CommandSender sender, final String[] args) {
+        if (!has(sender, Permissions.TOURNAMENT_CREATE)) return;
+        if (args.length < 3) {
+            message(sender, "&cИспользование: /tour rewardretry <турнир> <место 1-3>");
+            return;
+        }
+        final int place = parsePositive(args[2]);
+        final TournamentManager.RewardRetryResult result = tournamentManager.retryItemReward(args[1], place);
+        switch (result) {
+            case SUCCESS -> message(sender, "&aПредметная награда повторно поставлена в безопасную очередь выдачи.");
+            case NOT_FOUND -> message(sender, "&cТурнир не найден.");
+            case NOT_READY -> message(sender, "&cПовторная выдача доступна только для завершённой предметной награды за место 1-3.");
+            case NO_WINNER -> message(sender, "&cДля этого места победитель не определён.");
+            case NO_REWARD -> message(sender, "&cДля этого места не настроены предметы.");
+            case ALREADY_PENDING -> message(sender, "&eЭта награда уже ожидает выдачи; повторная очередь не создана.");
         }
     }
 
@@ -818,6 +892,7 @@ public class TournamentCommand extends BaseCommand implements Listener {
 
         switch (result) {
             case SUCCESS -> message(sender, "&aВы наблюдаете за матчем турнира.");
+            case MENU_OPENED -> message(sender, "&eВыберите активную пару в открывшемся меню.");
             case NOT_FOUND -> message(sender, "&cТурнир не найден.");
             case NO_MATCH -> message(sender, "&cМатч не найден.");
             case NOT_STARTED -> message(sender, "&eМатч ещё не начался.");
@@ -948,7 +1023,7 @@ public class TournamentCommand extends BaseCommand implements Listener {
         message(sender, "&e/tour kits <турнир> list|toggle|clear [kit] &7- разрешённые киты");
         message(sender, "&e/tour arenas <турнир> list|toggle|clear [arena] &7- разрешённые арены");
         message(sender, "&e/tour add <турнир> <ник> &7- вручную добавить участника");
-        message(sender, "&e/tour remove <турнир> <ник> &7- вручную убрать участника до старта");
+        message(sender, "&e/tour remove <турнир> <ник> &7- исключить участника до или во время турнира");
         message(sender, "&e/tour start <турнир> &7- сформировать сетку и запустить турнир");
         message(sender, "&e/tour cancel <турнир> &7- отменить турнир без удаления");
         message(sender, "&e/tour reset <турнир> &7- вернуть турнир в регистрацию, сохранив участников");
@@ -966,7 +1041,7 @@ public class TournamentCommand extends BaseCommand implements Listener {
         message(sender, "&e/tour next <турнир> &7- то же самое, короткий алиас");
         message(sender, "&e/tour match start <турнир> <раунд> <матч> &7- запустить конкретный матч");
         message(sender, "&e/tour win <турнир> <ник> &7- вручную засчитать победу игроку");
-        message(sender, "&e/tour replay <турнир> <раунд> <матч> &7- вернуть матч на переигровку");
+        message(sender, "&e/tour replay <турнир> [раунд] [матч] &7- переиграть последнюю либо указанную пару");
         message(sender, "&e/tour info <турнир> &7- посмотреть номера раундов и матчей");
         message(sender, "&7Если игрок не онлайн, матч уходит в ожидание; по таймеру победа даётся онлайн-игроку.");
         message(sender, "&8&m                                                ");
@@ -1093,10 +1168,17 @@ public class TournamentCommand extends BaseCommand implements Listener {
             return;
         }
         final InventoryHolder holder = event.getInventory().getHolder();
+        if (holder instanceof TournamentRewardItemsMenu menu) {
+            final Tournament tournament = tournamentManager.getTournament(menu.tournament());
+            if (tournament == null || tournament.getStatus() != TournamentStatus.CREATED) event.setCancelled(true);
+            return;
+        }
         if (!(holder instanceof TournamentListMenu) && !(holder instanceof TournamentActionMenu)
                 && !(holder instanceof TournamentHologramMenu) && !(holder instanceof TournamentNpcMenu)
                 && !(holder instanceof TournamentPlayerMenu)
-                && !(holder instanceof TournamentKitLimitMenu) && !(holder instanceof TournamentArenaLimitMenu)) {
+                && !(holder instanceof TournamentKitLimitMenu) && !(holder instanceof TournamentArenaLimitMenu)
+                && !(holder instanceof TournamentRegistrationSettingsMenu)
+                && !(holder instanceof TournamentReplayMenu) && !(holder instanceof TournamentRewardsMenu)) {
             return;
         }
 
@@ -1115,11 +1197,39 @@ public class TournamentCommand extends BaseCommand implements Listener {
             handleTournamentKitLimitClick(player, menu.tournament(), event.getRawSlot());
         } else if (holder instanceof TournamentArenaLimitMenu menu) {
             handleTournamentArenaLimitClick(player, menu.tournament(), event.getRawSlot());
+        } else if (holder instanceof TournamentRegistrationSettingsMenu menu) {
+            handleTournamentRegistrationSettingsClick(player, menu.tournament(), event.getRawSlot());
+        } else if (holder instanceof TournamentReplayMenu menu) {
+            handleTournamentReplayClick(player, menu, event.getRawSlot());
+        } else if (holder instanceof TournamentRewardsMenu menu) {
+            handleTournamentRewardsClick(player, menu.tournament(), event.getRawSlot());
         }
     }
 
     @EventHandler
-    public void onNpcBindingChat(final AsyncPlayerChatEvent event) {
+    public void onTournamentRewardInventoryClose(final InventoryCloseEvent event) {
+        if (!(event.getInventory().getHolder() instanceof TournamentRewardItemsMenu menu)) return;
+        rewardEditors.remove(menu.key(), event.getPlayer().getUniqueId());
+        tournamentManager.setItemRewards(menu.tournament(), menu.place(), Arrays.asList(event.getInventory().getContents()));
+    }
+
+    @EventHandler
+    public void onTournamentChatInput(final AsyncPlayerChatEvent event) {
+        final PendingRewardSettingInput rewardInput = pendingRewardInputs.remove(event.getPlayer().getUniqueId());
+        if (rewardInput != null) {
+            event.setCancelled(true);
+            final String value = event.getMessage().trim();
+            Bukkit.getScheduler().runTask(plugin, () -> finishRewardSettingInput(event.getPlayer(), rewardInput, value));
+            return;
+        }
+        final PendingRegistrationSettingInput pendingInput = pendingRegistrationInputs.remove(event.getPlayer().getUniqueId());
+        if (pendingInput != null) {
+            event.setCancelled(true);
+            final String value = event.getMessage().trim();
+            Bukkit.getScheduler().runTask(plugin, () -> finishRegistrationSettingInput(event.getPlayer(), pendingInput, value));
+            return;
+        }
+
         final String tournamentName = pendingNpcBindings.remove(event.getPlayer().getUniqueId());
         if (tournamentName == null) {
             return;
@@ -1155,6 +1265,43 @@ public class TournamentCommand extends BaseCommand implements Listener {
         if (tournament != null) {
             openTournamentNpcSettings(player, tournament);
         }
+    }
+
+    private void finishRegistrationSettingInput(final Player player, final PendingRegistrationSettingInput input, final String rawValue) {
+        final Tournament tournament = tournamentManager.getTournament(input.tournament());
+        if ("cancel".equalsIgnoreCase(rawValue) || "отмена".equalsIgnoreCase(rawValue)) {
+            message(player, "&eНастройка регистрации отменена.");
+            if (tournament != null) {
+                openTournamentRegistrationSettings(player, tournament);
+            }
+            return;
+        }
+        if (tournament == null) {
+            message(player, "&cТурнир не найден.");
+            return;
+        }
+
+        switch (input.type()) {
+            case PLAYTIME_HOURS -> {
+                final Integer hours = parseNonNegativeInt(rawValue);
+                if (hours == null) {
+                    message(player, "&cВведите целое число часов. Например: &f20");
+                } else {
+                    tournamentManager.setRequiredPlaytimeHours(tournament.getName(), hours);
+                    message(player, "&aМинимальный онлайн для регистрации: &f" + hours + " ч&a.");
+                }
+            }
+            case ENTRY_FEE_AMOUNT -> {
+                final Double amount = parseNonNegativeDouble(rawValue);
+                if (amount == null) {
+                    message(player, "&cВведите сумму числом. Например: &f500");
+                } else {
+                    tournamentManager.setEntryFeeAmount(tournament.getName(), amount);
+                    message(player, "&aВзнос за регистрацию: &f" + formatMoney(amount) + "&a.");
+                }
+            }
+        }
+        openTournamentRegistrationSettings(player, tournament);
     }
 
     private void openPlayerMenu(final Player player, final String requestedTournament) {
@@ -1266,6 +1413,13 @@ public class TournamentCommand extends BaseCommand implements Listener {
                 "&7Сейчас: &f" + listState(tournament.getAllowedArenas()),
                 " ",
                 tournament.getStatus() == TournamentStatus.CREATED ? "&eНажмите, чтобы настроить." : "&cМожно менять только до запуска."));
+        if (tournamentMenuSessions.contains(player.getUniqueId())) {
+            inventory.setItem(23, item(Material.NETHER_STAR, "&6Награды турнира",
+                    "&7Состояние: " + enabledLine(tournament.isRewardsEnabled()),
+                    "&7Тип: &f" + formatRewardType(tournament.getRewardType()),
+                    "&7Фонд из оплат: &f" + formatMoney(tournament.getRewardFund().doubleValue()),
+                    " ", "&eНажмите, чтобы настроить."));
+        }
         inventory.setItem(24, item(Material.VILLAGER_SPAWN_EGG, "&aNPC турнира",
                 "&7Привязка FancyNPC к турниру.",
                 "&7Привязано: &f" + tournamentManager.getFancyNpcBindings(tournament.getName()).size(),
@@ -1274,6 +1428,21 @@ public class TournamentCommand extends BaseCommand implements Listener {
         inventory.setItem(25, item(Material.COMPARATOR, "&dНастройка голограммы",
                 "&7Создание, перенос, обновление",
                 "&7и удаление панелей."));
+        inventory.setItem(26, item(Material.GOLD_INGOT, "&6Условия регистрации",
+                "&7Минимальный онлайн: " + enabledLine(tournament.isPlaytimeRequirementEnabled()),
+                "&7Нужно часов: &f" + tournament.getRequiredPlaytimeHours(),
+                "&7Взнос: " + enabledLine(tournament.isEntryFeeEnabled()),
+                "&7Сумма: &f" + formatMoney(tournament.getEntryFeeAmount()),
+                " ",
+                "&eНажмите, чтобы настроить."));
+
+        if (tournamentMenuSessions.contains(player.getUniqueId())) {
+            inventory.setItem(28, item(Material.RECOVERY_COMPASS, "&dПереигровка матчей",
+                    "&7Вернуть последнюю завершённую пару",
+                    "&7или выбрать конкретный матч.",
+                    " ",
+                    "&eНажмите, чтобы открыть список."));
+        }
 
         inventory.setItem(30, headDbItem(CANCEL_HEAD_ID, Material.RED_DYE, "&cОтменить турнир",
                 "&7Останавливает турнир,", "&7но не удаляет его."));
@@ -1459,6 +1628,12 @@ public class TournamentCommand extends BaseCommand implements Listener {
                 openTournamentHologramSettings(player, tournament);
             }
             case 24 -> openTournamentNpcSettings(player, tournament);
+            case 26 -> openTournamentRegistrationSettings(player, tournament);
+            case 28 -> {
+                if (tournamentMenuSessions.contains(player.getUniqueId())) {
+                    openTournamentReplayMenu(player, tournament);
+                }
+            }
             case 20 -> {
                 final TournamentKitMode nextMode = tournament.getKitMode() == TournamentKitMode.PLAYER_CHOICE
                         ? TournamentKitMode.FIXED
@@ -1472,9 +1647,371 @@ public class TournamentCommand extends BaseCommand implements Listener {
             }
             case 21 -> openTournamentKitLimits(player, tournament);
             case 22 -> openTournamentArenaLimits(player, tournament);
+            case 23 -> {
+                if (tournamentMenuSessions.contains(player.getUniqueId())) openTournamentRewards(player, tournament);
+            }
             case 34 -> {
                 delete(player, new String[]{"delete", tournamentName});
                 openTournamentList(player);
+            }
+            default -> {
+            }
+        }
+    }
+
+    private void openTournamentReplayMenu(final Player player, final Tournament tournament) {
+        if (!has(player, Permissions.TOURNAMENT_REPLAY)) {
+            return;
+        }
+        final List<TournamentMatch> completed = tournament.getMatches().values().stream()
+                .flatMap(matches -> matches.values().stream())
+                .filter(match -> match.getStatus() == TournamentMatchStatus.FINISHED)
+                .filter(match -> match.getWinner() != null && match.isKnown() && !match.isBye())
+                .sorted(Comparator.comparingLong(TournamentMatch::getCompletedAt).reversed()
+                        .thenComparing(Comparator.comparingInt(TournamentMatch::getRound).reversed())
+                        .thenComparing(Comparator.comparingInt(TournamentMatch::getNumber).reversed()))
+                .toList();
+        final int[] slots = tournamentSlots();
+        final List<ReplayMatchKey> entries = completed.stream()
+                .limit(slots.length)
+                .map(match -> new ReplayMatchKey(match.getRound(), match.getNumber()))
+                .toList();
+        final Inventory inventory = Bukkit.createInventory(new TournamentReplayMenu(tournament.getName(), entries), 54,
+                StringUtil.color("&dПереигровка: &e" + tournament.getName()));
+        fill(inventory);
+        inventory.setItem(4, item(Material.RECOVERY_COMPASS, "&d&lПереигровка матчей",
+                "&7Выберите завершённую пару.",
+                "&7Все более поздние раунды будут пересобраны.",
+                " ",
+                completed.isEmpty() ? "&cЗавершённых матчей пока нет." : "&7Доступно матчей: &f" + completed.size()));
+
+        for (int index = 0; index < entries.size(); index++) {
+            final ReplayMatchKey key = entries.get(index);
+            final TournamentMatch match = tournament.getMatch(key.round(), key.match());
+            if (match == null) {
+                continue;
+            }
+            inventory.setItem(slots[index], item(Material.IRON_SWORD,
+                    "&eРаунд " + match.getRound() + " &8• &eМатч #" + match.getNumber(),
+                    "&7Игроки: &f" + match.getPlayer1() + " &7vs &f" + match.getPlayer2(),
+                    "&aПобедитель: &f" + match.getWinner(),
+                    "&cПроигравший: &f" + match.getOpponent(match.getWinner()),
+                    "&7Набор: &f" + (match.getSelectedKit() == null ? tournament.getKit() : match.getSelectedKit()),
+                    " ",
+                    "&eНажмите, чтобы запросить переигровку."));
+        }
+
+        inventory.setItem(45, item(Material.CLOCK, "&6Переиграть последнюю пару",
+                "&7Автоматически выбирает матч,",
+                "&7который завершился последним.",
+                " ",
+                completed.isEmpty() ? "&cНет доступного матча." : "&eНажмите для подтверждения."));
+        inventory.setItem(49, item(Material.ARROW, "&7Назад", "&7Вернуться к управлению турниром."));
+        player.openInventory(inventory);
+    }
+
+    private void handleTournamentReplayClick(final Player player, final TournamentReplayMenu menu, final int slot) {
+        final Tournament tournament = tournamentManager.getTournament(menu.tournament());
+        if (slot == 49) {
+            if (tournament == null) {
+                openTournamentList(player);
+            } else {
+                openTournamentActions(player, tournament);
+            }
+            return;
+        }
+        if (tournament == null) {
+            player.closeInventory();
+            message(player, "&cТурнир не найден.");
+            return;
+        }
+        if (slot == 45) {
+            requestReplayConfirmation(player, "/tour replay " + tournament.getName(), "последнюю завершённую пару");
+            return;
+        }
+
+        final int[] slots = tournamentSlots();
+        for (int index = 0; index < slots.length && index < menu.entries().size(); index++) {
+            if (slot != slots[index]) {
+                continue;
+            }
+            final ReplayMatchKey key = menu.entries().get(index);
+            requestReplayConfirmation(player,
+                    "/tour replay " + tournament.getName() + " " + key.round() + " " + key.match(),
+                    "раунд " + key.round() + ", матч #" + key.match());
+            return;
+        }
+    }
+
+    private void requestReplayConfirmation(final Player player, final String command, final String matchDescription) {
+        player.closeInventory();
+        message(player, "&8&m                                                ");
+        message(player, "&d&lПодтверждение переигровки");
+        message(player, "&7Будет возвращён: &f" + matchDescription + "&7.");
+        message(player, "&cВсе более поздние раунды турнира будут пересобраны.");
+        sendConfirmableCommand(player, "&7Подтвердить: ", command);
+        message(player, "&8&m                                                ");
+    }
+
+    private void openTournamentRewards(final Player player, final Tournament tournament) {
+        final Inventory inventory = Bukkit.createInventory(new TournamentRewardsMenu(tournament.getName()), 45,
+                StringUtil.color("&6Награды: &e" + tournament.getName()));
+        fill(inventory);
+        final BigDecimal shownFund = tournament.getRewardType() == TournamentRewardType.FIXED_MONEY
+                ? tournamentManager.getFixedRewardTotal(tournament) : tournament.getRewardFund();
+        inventory.setItem(4, item(Material.NETHER_STAR, "&6&lНаграды турнира",
+                "&7Состояние: " + enabledLine(tournament.isRewardsEnabled()),
+                "&7Тип: &f" + formatRewardType(tournament.getRewardType()),
+                "&7Текущий фонд: &a" + formatMoney(shownFund.doubleValue()),
+                "&7Учтено оплат: &f" + tournament.getPaymentRecords().values().stream().filter(value -> value.isAddedToFund()).count(),
+                " ", tournament.getStatus() == TournamentStatus.CREATED
+                        ? "&7Настройки доступны до запуска." : "&cНастройки уже заблокированы."));
+        inventory.setItem(10, item(tournament.isRewardsEnabled() ? Material.LIME_DYE : Material.GRAY_DYE,
+                "&eНаграды", "&7Сейчас: " + enabledLine(tournament.isRewardsEnabled()), " ", "&eНажмите, чтобы переключить."));
+        inventory.setItem(12, item(Material.COMPARATOR, "&eТип награды",
+                "&7Сейчас: &f" + formatRewardType(tournament.getRewardType()), " ", "&eНажмите, чтобы выбрать следующий тип."));
+        inventory.setItem(14, item(Material.EMERALD_BLOCK, "&aТекущий призовой фонд",
+                "&f" + formatMoney(shownFund.doubleValue()),
+                tournament.getRewardType() == TournamentRewardType.ENTRY_FEE_POOL
+                        ? "&7Считается только по успешным оплатам." : "&7Сумма выбранных денежных наград."));
+        inventory.setItem(16, item(tournament.getRewardType() == TournamentRewardType.ENTRY_FEE_POOL
+                        ? Material.LIME_DYE : Material.GRAY_DYE,
+                "&6Использовать взносы как фонд",
+                "&7Сейчас: " + enabledLine(tournament.getRewardType() == TournamentRewardType.ENTRY_FEE_POOL),
+                "&7Используется существующий взнос.", "&cПовторного списания не выполняется.", " ", "&eНажмите, чтобы переключить."));
+
+        if (tournament.getRewardType() == TournamentRewardType.ITEMS) {
+            for (int place = 1; place <= 3; place++) {
+                final int slot = 18 + place * 2;
+                inventory.setItem(slot, item(Material.CHEST, "&eПредметы за " + place + " место",
+                        "&7Сохранено стаков: &f" + tournament.getItemRewards().getOrDefault(place, List.of()).size(),
+                        " ", "&eНажмите, чтобы открыть хранилище."));
+            }
+        } else if (tournament.getRewardType() == TournamentRewardType.FIXED_MONEY) {
+            inventory.setItem(20, moneyRewardItem(1, tournament.getFixedFirstReward()));
+            inventory.setItem(22, moneyRewardItem(2, tournament.getFixedSecondReward()));
+            inventory.setItem(24, moneyRewardItem(3, tournament.getFixedThirdReward()));
+        } else {
+            inventory.setItem(20, item(Material.GOLD_INGOT, "&eРаспределение фонда",
+                    "&7🥇 1 место: &f" + tournament.getFirstRewardPercent() + "%",
+                    "&7🥈 2 место: &f" + tournament.getSecondRewardPercent() + "%",
+                    "&7🥉 3 место: &f" + tournament.getThirdRewardPercent() + "%",
+                    " ", "&eНажмите и введите три числа."));
+            inventory.setItem(22, item(Material.PAPER, "&eСуществующий вступительный взнос",
+                    "&7Включён: " + enabledLine(tournament.isEntryFeeEnabled()),
+                    "&7Стоимость: &f" + formatMoney(tournament.getEntryFeeAmount()),
+                    "&7Фонд: &a" + formatMoney(tournament.getRewardFund().doubleValue()),
+                    " ", "&7Настраивается отдельно в", "&7разделе условий регистрации."));
+            inventory.setItem(24, item(Material.BOOK, "&eУчёт фактических оплат",
+                    "&7Успешных записей: &f" + tournament.getPaymentRecords().values().stream()
+                            .filter(value -> value.getStatus().name().equals("SUCCESS")).count(),
+                    "&7Добавлено в фонд: &f" + tournament.getPaymentRecords().values().stream()
+                            .filter(value -> value.isAddedToFund()).count(),
+                    " ", "&7Кик и выход фонд не уменьшают."));
+        }
+        inventory.setItem(40, item(Material.ARROW, "&7Назад", "&7Вернуться к управлению турниром."));
+        player.openInventory(inventory);
+    }
+
+    private ItemStack moneyRewardItem(final int place, final BigDecimal amount) {
+        return item(Material.EMERALD, "&e" + place + " место: &a" + formatMoney(amount.doubleValue()),
+                " ", "&eНажмите, чтобы ввести сумму.", "&7Значение не может быть отрицательным.");
+    }
+
+    private void handleTournamentRewardsClick(final Player player, final String tournamentName, final int slot) {
+        final Tournament tournament = tournamentManager.getTournament(tournamentName);
+        if (slot == 40) {
+            if (tournament != null) openTournamentActions(player, tournament); else openTournamentList(player);
+            return;
+        }
+        if (tournament == null) { player.closeInventory(); message(player, "&cТурнир не найден."); return; }
+        if (tournament.getStatus() != TournamentStatus.CREATED) {
+            message(player, "&cНаграды можно настраивать только до запуска турнира.");
+            return;
+        }
+        switch (slot) {
+            case 10 -> tournamentManager.setRewardsEnabled(tournamentName, !tournament.isRewardsEnabled());
+            case 12 -> {
+                final TournamentRewardType[] values = TournamentRewardType.values();
+                tournamentManager.setRewardType(tournamentName, values[(tournament.getRewardType().ordinal() + 1) % values.length]);
+            }
+            case 16 -> tournamentManager.setRewardType(tournamentName,
+                    tournament.getRewardType() == TournamentRewardType.ENTRY_FEE_POOL
+                            ? TournamentRewardType.FIXED_MONEY : TournamentRewardType.ENTRY_FEE_POOL);
+            case 20, 22, 24 -> {
+                final int place = (slot - 18) / 2;
+                if (tournament.getRewardType() == TournamentRewardType.ITEMS) {
+                    openTournamentRewardItems(player, tournament, place);
+                    return;
+                }
+                if (tournament.getRewardType() == TournamentRewardType.FIXED_MONEY) {
+                    beginRewardInput(player, tournament, RewardSettingInputType.values()[place - 1]);
+                    return;
+                }
+                if (slot == 20) {
+                    beginRewardInput(player, tournament, RewardSettingInputType.PERCENTAGES);
+                    return;
+                }
+            }
+            default -> { return; }
+        }
+        openTournamentRewards(player, tournament);
+    }
+
+    private void beginRewardInput(final Player player, final Tournament tournament, final RewardSettingInputType type) {
+        pendingRewardInputs.put(player.getUniqueId(), new PendingRewardSettingInput(tournament.getName(), type));
+        player.closeInventory();
+        message(player, "&6&lНастройка наград турнира");
+        message(player, type == RewardSettingInputType.PERCENTAGES
+                ? "&7Введите проценты за 1, 2 и 3 место через пробел. Например: &f60 30 10"
+                : "&7Введите сумму награды. Например: &f50000");
+        message(player, "&7Отмена: &ccancel");
+    }
+
+    private void finishRewardSettingInput(final Player player, final PendingRewardSettingInput input, final String raw) {
+        final Tournament tournament = tournamentManager.getTournament(input.tournament());
+        if (tournament == null) { message(player, "&cТурнир не найден."); return; }
+        if (raw.equalsIgnoreCase("cancel") || raw.equalsIgnoreCase("отмена")) {
+            message(player, "&eНастройка награды отменена.");
+            openTournamentRewards(player, tournament);
+            return;
+        }
+        if (input.type() == RewardSettingInputType.PERCENTAGES) {
+            final String[] parts = raw.trim().split("[\\s/;,:]+");
+            try {
+                if (parts.length != 3 || !tournamentManager.setRewardPercentages(tournament.getName(),
+                        Integer.parseInt(parts[0]), Integer.parseInt(parts[1]), Integer.parseInt(parts[2]))) {
+                    message(player, "&cСумма распределения наград должна составлять 100%.");
+                } else message(player, "&aРаспределение фонда сохранено.");
+            } catch (NumberFormatException ex) {
+                message(player, "&cВведите три целых неотрицательных числа.");
+            }
+        } else {
+            try {
+                final BigDecimal amount = new BigDecimal(raw.replace(" ", "").replace(',', '.'));
+                final int place = input.type().ordinal() + 1;
+                if (!tournamentManager.setFixedReward(tournament.getName(), place, amount)) {
+                    message(player, "&cНекорректная сумма награды.");
+                } else message(player, "&aНаграда за " + place + " место сохранена.");
+            } catch (NumberFormatException ex) {
+                message(player, "&cВведите корректную неотрицательную сумму.");
+            }
+        }
+        openTournamentRewards(player, tournament);
+    }
+
+    private void openTournamentRewardItems(final Player player, final Tournament tournament, final int place) {
+        final String key = tournament.getName().toLowerCase() + ":" + place;
+        final UUID existing = rewardEditors.putIfAbsent(key, player.getUniqueId());
+        if (existing != null && !existing.equals(player.getUniqueId())) {
+            message(player, "&cЭто хранилище уже редактирует другой организатор.");
+            return;
+        }
+        final Inventory inventory = Bukkit.createInventory(new TournamentRewardItemsMenu(tournament.getName(), place, key), 54,
+                StringUtil.color("&6Награда за " + place + " место"));
+        final List<ItemStack> saved = tournament.getItemRewards().getOrDefault(place, List.of());
+        for (int slot = 0; slot < saved.size() && slot < inventory.getSize(); slot++) inventory.setItem(slot, saved.get(slot).clone());
+        player.openInventory(inventory);
+        message(player, "&7Положите предметы в хранилище. Оно сохранится при закрытии.");
+    }
+
+    private String formatRewardType(final TournamentRewardType type) {
+        return switch (type) {
+            case ITEMS -> "Предметы";
+            case FIXED_MONEY -> "Фиксированные деньги";
+            case ENTRY_FEE_POOL -> "Фонд из вступительных взносов";
+        };
+    }
+
+    private void openTournamentRegistrationSettings(final Player player, final Tournament tournament) {
+        final Inventory inventory = Bukkit.createInventory(new TournamentRegistrationSettingsMenu(tournament.getName()), 36,
+                StringUtil.color("&6Регистрация: &e" + tournament.getName()));
+        fill(inventory);
+        inventory.setItem(4, item(Material.GOLD_INGOT, "&6&lУсловия регистрации",
+                "&7Турнир: &e" + tournament.getName(),
+                "&7Проверка онлайна: " + enabledLine(tournament.isPlaytimeRequirementEnabled()),
+                "&7Минимум: &f" + tournament.getRequiredPlaytimeHours() + " ч",
+                "&7Взнос: " + enabledLine(tournament.isEntryFeeEnabled()),
+                "&7Сумма: &f" + formatMoney(tournament.getEntryFeeAmount()),
+                " ",
+                "&7Проверки применяются к игроку",
+                "&7при самостоятельной регистрации."));
+        inventory.setItem(10, item(tournament.isPlaytimeRequirementEnabled() ? Material.LIME_DYE : Material.GRAY_DYE,
+                "&eТребование онлайна",
+                "&7Сейчас: " + enabledLine(tournament.isPlaytimeRequirementEnabled()),
+                " ",
+                "&eЛКМ: включить/выключить."));
+        inventory.setItem(12, item(Material.CLOCK, "&aМинимум часов",
+                "&7Сейчас: &f" + tournament.getRequiredPlaytimeHours() + " ч",
+                " ",
+                "&eЛКМ: ввести число часов в чат.",
+                "&7Пример: &f20"));
+        inventory.setItem(14, item(tournament.isEntryFeeEnabled() ? Material.LIME_DYE : Material.GRAY_DYE,
+                "&eВзнос за регистрацию",
+                "&7Сейчас: " + enabledLine(tournament.isEntryFeeEnabled()),
+                " ",
+                "&eЛКМ: включить/выключить."));
+        inventory.setItem(16, item(Material.EMERALD, "&aСумма взноса",
+                "&7Сейчас: &f" + formatMoney(tournament.getEntryFeeAmount()),
+                " ",
+                "&eЛКМ: ввести сумму в чат.",
+                "&7Пример: &f500"));
+        inventory.setItem(31, item(Material.ARROW, "&7Назад", "&7Вернуться к управлению турниром."));
+        player.openInventory(inventory);
+    }
+
+    private void handleTournamentRegistrationSettingsClick(final Player player, final String tournamentName, final int slot) {
+        final Tournament tournament = tournamentManager.getTournament(tournamentName);
+        if (slot == 31) {
+            if (tournament == null) {
+                openTournamentList(player);
+            } else {
+                openTournamentActions(player, tournament);
+            }
+            return;
+        }
+        if (tournament == null) {
+            player.closeInventory();
+            message(player, "&cТурнир не найден.");
+            return;
+        }
+
+        switch (slot) {
+            case 10 -> {
+                tournamentManager.setPlaytimeRequirementEnabled(tournament.getName(), !tournament.isPlaytimeRequirementEnabled());
+                message(player, tournament.isPlaytimeRequirementEnabled()
+                        ? "&aТребование онлайна включено."
+                        : "&eТребование онлайна выключено.");
+                openTournamentRegistrationSettings(player, tournament);
+            }
+            case 12 -> {
+                pendingRegistrationInputs.put(player.getUniqueId(),
+                        new PendingRegistrationSettingInput(tournament.getName(), RegistrationSettingInputType.PLAYTIME_HOURS));
+                player.closeInventory();
+                message(player, "&8&m                                                ");
+                message(player, "&6&lМинимальный онлайн для регистрации");
+                message(player, "&7Турнир: &e" + tournament.getName());
+                message(player, "&7Введите в чат число часов. Например: &f20");
+                message(player, "&7Отмена: &ccancel");
+                message(player, "&8&m                                                ");
+            }
+            case 14 -> {
+                tournamentManager.setEntryFeeEnabled(tournament.getName(), !tournament.isEntryFeeEnabled());
+                message(player, tournament.isEntryFeeEnabled()
+                        ? "&aВзнос за регистрацию включён."
+                        : "&eВзнос за регистрацию выключен.");
+                openTournamentRegistrationSettings(player, tournament);
+            }
+            case 16 -> {
+                pendingRegistrationInputs.put(player.getUniqueId(),
+                        new PendingRegistrationSettingInput(tournament.getName(), RegistrationSettingInputType.ENTRY_FEE_AMOUNT));
+                player.closeInventory();
+                message(player, "&8&m                                                ");
+                message(player, "&6&lСумма взноса за регистрацию");
+                message(player, "&7Турнир: &e" + tournament.getName());
+                message(player, "&7Введите сумму в чат. Например: &f500");
+                message(player, "&7Отмена: &ccancel");
+                message(player, "&8&m                                                ");
             }
             default -> {
             }
@@ -1693,6 +2230,35 @@ public class TournamentCommand extends BaseCommand implements Listener {
         return values.isEmpty() ? "без ограничений" : String.valueOf(values.size());
     }
 
+    private String enabledLine(final boolean enabled) {
+        return enabled ? "&aвключено" : "&cвыключено";
+    }
+
+    private String formatMoney(final double amount) {
+        if (amount == Math.rint(amount)) {
+            return String.valueOf((long) amount);
+        }
+        return String.format(java.util.Locale.US, "%.2f", amount);
+    }
+
+    private Integer parseNonNegativeInt(final String value) {
+        try {
+            final int parsed = Integer.parseInt(value.trim());
+            return parsed < 0 ? null : parsed;
+        } catch (NumberFormatException ex) {
+            return null;
+        }
+    }
+
+    private Double parseNonNegativeDouble(final String value) {
+        try {
+            final double parsed = Double.parseDouble(value.trim().replace(',', '.'));
+            return Double.isFinite(parsed) && parsed >= 0D ? parsed : null;
+        } catch (NumberFormatException ex) {
+            return null;
+        }
+    }
+
     private ItemStack item(final Material material, final String name, final String... lore) {
         final ItemStack item = new ItemStack(material);
         final ItemMeta meta = item.getItemMeta();
@@ -1801,11 +2367,56 @@ public class TournamentCommand extends BaseCommand implements Listener {
         }
     }
 
+    private record TournamentRegistrationSettingsMenu(String tournament) implements InventoryHolder {
+        @Override
+        public Inventory getInventory() {
+            return null;
+        }
+    }
+
+    private record TournamentRewardsMenu(String tournament) implements InventoryHolder {
+        @Override
+        public Inventory getInventory() { return null; }
+    }
+
+    private record TournamentRewardItemsMenu(String tournament, int place, String key) implements InventoryHolder {
+        @Override
+        public Inventory getInventory() { return null; }
+    }
+
+    private record TournamentReplayMenu(String tournament, List<ReplayMatchKey> entries) implements InventoryHolder {
+        @Override
+        public Inventory getInventory() {
+            return null;
+        }
+    }
+
+    private record ReplayMatchKey(int round, int match) {
+    }
+
     private record TournamentPlayerMenu(String tournament) implements InventoryHolder {
         @Override
         public Inventory getInventory() {
             return null;
         }
+    }
+
+    private record PendingRegistrationSettingInput(String tournament, RegistrationSettingInputType type) {
+    }
+
+    private record PendingRewardSettingInput(String tournament, RewardSettingInputType type) {
+    }
+
+    private enum RewardSettingInputType {
+        FIXED_FIRST,
+        FIXED_SECOND,
+        FIXED_THIRD,
+        PERCENTAGES
+    }
+
+    private enum RegistrationSettingInputType {
+        PLAYTIME_HOURS,
+        ENTRY_FEE_AMOUNT
     }
 
     @Override

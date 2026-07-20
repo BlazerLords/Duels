@@ -4,12 +4,23 @@ import com.meteordevelopments.duels.DuelsPlugin;
 import com.meteordevelopments.duels.core.arena.ArenaImpl;
 import com.meteordevelopments.duels.core.kit.KitImpl;
 import com.meteordevelopments.duels.core.match.DuelMatch;
+import com.meteordevelopments.duels.hook.hooks.worldguard.WorldGuardHook;
 import com.meteordevelopments.duels.util.Loadable;
+import org.bukkit.Bukkit;
+import org.bukkit.World;
+import org.bukkit.Location;
 import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerQuitEvent;
 
 import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
-public final class DestructibleArenaService implements Loadable {
+public final class DestructibleArenaService implements Loadable, Listener {
+    private final DuelsPlugin plugin;
     private final DestructibleArenaSessionRegistry registry = new DestructibleArenaSessionRegistry();
     private final ArenaProtectionService protection = new ArenaProtectionService(registry);
     private final ArenaExplosionService explosions = new ArenaExplosionService(registry);
@@ -18,10 +29,13 @@ public final class DestructibleArenaService implements Loadable {
     private final ArenaRecoveryService recovery;
 
     public DestructibleArenaService(DuelsPlugin plugin) {
+        this.plugin = plugin;
         entities = new ArenaEntityTracker(plugin, registry);
         restore = new ArenaRestoreService(plugin, registry);
         recovery = new ArenaRecoveryService(plugin, registry, restore);
+        restore.setBeforeRestore(this::releaseWorldGuardBypass);
         restore.setCompletion(recovery::saveSnapshotAsync);
+        plugin.registerListener(this);
     }
 
     @Override
@@ -29,6 +43,7 @@ public final class DestructibleArenaService implements Loadable {
 
     @Override
     public void handleUnload() {
+        List.copyOf(registry.sessions()).forEach(this::releaseWorldGuardBypass);
         recovery.shutdown();
         for (DestructibleArenaSession session : registry.sessions()) {
             if (session.getRestoreTask() != null) session.getRestoreTask().cancel();
@@ -68,6 +83,69 @@ public final class DestructibleArenaService implements Loadable {
     public ArenaExplosionService getExplosions() { return explosions; }
     public ArenaEntityTracker getEntities() { return entities; }
     public ArenaRestoreService getRestore() { return restore; }
+
+    public boolean isDestructionDisabled(final Player player) {
+        final ArenaImpl arena = plugin.getArenaManager().get(player);
+        if (arena == null || arena.getMatch() == null) return false;
+        final KitImpl kit = arena.getMatch().getKit();
+        return kit == null || !kit.getDestructibleArena().isEnabled();
+    }
+
+    public boolean isDestructionDisabledAt(final Location location) {
+        if (location == null || location.getWorld() == null) return false;
+        for (ArenaImpl arena : plugin.getArenaManager().getArenasImpl()) {
+            if (!arena.isUsed() || arena.getMatch() == null || arena.getArenaBounds() == null
+                    || !arena.isInBounds(location)) continue;
+            final KitImpl kit = arena.getMatch().getKit();
+            if (kit == null || !kit.getDestructibleArena().isEnabled()) return true;
+        }
+        return false;
+    }
+
+    @EventHandler
+    public void onQuit(PlayerQuitEvent event) {
+        DestructibleArenaSession session = registry.byPlayer(event.getPlayer());
+        if (session != null) {
+            releaseWorldGuardBypass(session, event.getPlayer().getUniqueId());
+        }
+    }
+
+    private void grantWorldGuardBypass(DestructibleArenaSession session, Collection<Player> players) {
+        WorldGuardHook worldGuard = Bukkit.getPluginManager().isPluginEnabled(WorldGuardHook.NAME)
+                ? DuelsPlugin.getInstance().getHookManager().getHook(WorldGuardHook.class)
+                : null;
+        World world = Bukkit.getWorld(session.getBounds().worldId());
+        if (worldGuard == null || world == null) {
+            return;
+        }
+
+        for (Player player : players) {
+            DestructibleArenaSession.WorldGuardBypassKey key =
+                    new DestructibleArenaSession.WorldGuardBypassKey(player.getUniqueId(), world.getUID());
+            session.getWorldGuardBypasses().putIfAbsent(key, worldGuard.enableBypass(player, world));
+        }
+    }
+
+    private void releaseWorldGuardBypass(DestructibleArenaSession session) {
+        for (DestructibleArenaSession.WorldGuardBypassKey key : List.copyOf(session.getWorldGuardBypasses().keySet())) {
+            releaseWorldGuardBypass(session, key.playerId());
+        }
+    }
+
+    private void releaseWorldGuardBypass(DestructibleArenaSession session, UUID playerId) {
+        WorldGuardHook worldGuard = DuelsPlugin.getInstance().getHookManager().getHook(WorldGuardHook.class);
+        for (Map.Entry<DestructibleArenaSession.WorldGuardBypassKey, com.meteordevelopments.duels.hook.hooks.worldguard.WorldGuardHandler.BypassState> entry
+                : List.copyOf(session.getWorldGuardBypasses().entrySet())) {
+            DestructibleArenaSession.WorldGuardBypassKey key = entry.getKey();
+            if (!key.playerId().equals(playerId)) {
+                continue;
+            }
+            if (worldGuard != null) {
+                worldGuard.restoreBypass(key.playerId(), key.worldId(), entry.getValue());
+            }
+            session.getWorldGuardBypasses().remove(key);
+        }
+    }
 
     public enum StartResult { DISABLED, READY, MISSING_BOUNDS, ARENA_BUSY }
 }

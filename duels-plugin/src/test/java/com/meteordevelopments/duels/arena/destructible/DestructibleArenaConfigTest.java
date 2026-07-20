@@ -12,6 +12,43 @@ class DestructibleArenaConfigTest {
     }
 
     @Test
+    void disabledMasterSwitchOverridesEveryDestructiveSubFeature() {
+        DestructibleArenaConfig config = new DestructibleArenaConfig();
+        config.setAllowBlockPlace(true);
+        config.setAllowBlockBreak(true);
+        config.setAllowExplosions(true);
+        config.setAllowEndCrystals(true);
+        config.setAllowRespawnAnchors(true);
+        config.setAllowTntMinecarts(true);
+        config.setAllowTnt(true);
+        config.setAllowBedExplosions(true);
+        config.setAllowCobwebs(true);
+        config.setAllowRails(true);
+        config.setAllowLiquids(true);
+        config.setAllowPistons(true);
+        config.setAllowFire(true);
+        config.setSuppressBlockDrops(false);
+        config.setSuppressEntityDrops(false);
+
+        assertAll(
+                () -> assertFalse(config.isAllowBlockPlace()),
+                () -> assertFalse(config.isAllowBlockBreak()),
+                () -> assertFalse(config.isAllowExplosions()),
+                () -> assertFalse(config.isAllowEndCrystals()),
+                () -> assertFalse(config.isAllowRespawnAnchors()),
+                () -> assertFalse(config.isAllowTntMinecarts()),
+                () -> assertFalse(config.isAllowTnt()),
+                () -> assertFalse(config.isAllowBedExplosions()),
+                () -> assertFalse(config.isAllowCobwebs()),
+                () -> assertFalse(config.isAllowRails()),
+                () -> assertFalse(config.isAllowLiquids()),
+                () -> assertFalse(config.isAllowPistons()),
+                () -> assertFalse(config.isAllowFire()),
+                () -> assertTrue(config.isSuppressBlockDrops()),
+                () -> assertTrue(config.isSuppressEntityDrops()));
+    }
+
+    @Test
     void copyDoesNotShareMaterialSets() {
         DestructibleArenaConfig source = new DestructibleArenaConfig();
         DestructibleArenaConfig copy = source.copy();

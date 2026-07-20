@@ -12,8 +12,10 @@ public class TournamentMatch {
     private String player1;
     private String player2;
     private String winner;
+    private String selectedKit;
     private TournamentMatchStatus status = TournamentMatchStatus.WAITING;
     private long waitingSince;
+    private long completedAt;
 
     public TournamentMatch(final int round, final int number) {
         this.round = round;

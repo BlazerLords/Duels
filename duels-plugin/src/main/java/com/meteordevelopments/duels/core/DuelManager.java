@@ -16,6 +16,8 @@ import com.meteordevelopments.duels.config.Config;
 import com.meteordevelopments.duels.config.Lang;
 import com.meteordevelopments.duels.data.UserManagerImpl;
 import com.meteordevelopments.duels.hook.hooks.*;
+import com.meteordevelopments.duels.hook.hooks.worldguard.WorldGuardHandler;
+import com.meteordevelopments.duels.hook.hooks.worldguard.WorldGuardHook;
 import com.meteordevelopments.duels.party.Party;
 import com.meteordevelopments.duels.party.PartyManagerImpl;
 import com.meteordevelopments.duels.util.*;
@@ -54,6 +56,7 @@ import org.bukkit.event.player.PlayerTeleportEvent.TeleportCause;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.FireworkMeta;
+import org.bukkit.potion.PotionEffectType;
 
 import java.util.*;
 import java.util.regex.Matcher;
@@ -101,6 +104,7 @@ public class DuelManager implements Loadable {
         if (!match.tryBeginFinishing()) {
             return;
         }
+        finishMatchAccess(match);
         DuelsPlugin.getFoliaLib().getScheduler().runAtLocationLater(deadLocation, () -> {
             if (arena.getMatch() != match) {
                 return;
@@ -374,14 +378,14 @@ public class DuelManager implements Loadable {
             final boolean winnerDecided = size == 1;
 
             if (winnerDecided) {
-                for (final Player winner : match.getAlivePlayers()) {
+                for (final Player winner : new ArrayList<>(match.getAlivePlayers())) {
                     lang.sendMessage(winner, "DUEL.on-end.plugin-disable");
                     handleWin(winner, arena.getOpponent(winner), arena, match);
                 }
             } else {
                 final boolean ongoing = size > 1;
 
-                for (final Player player : match.getAllPlayers()) {
+                for (final Player player : new ArrayList<>(match.getAllPlayers())) {
                     if (match.isDead(player)) continue;
 
                     lang.sendMessage(player, "DUEL.on-end.plugin-disable");
@@ -517,7 +521,9 @@ public class DuelManager implements Loadable {
 
     private boolean restorePlayer(final Player player, final DuelMatch match) {
         final boolean resetPlayer = !(match.isOwnInventory() && config.isOwnInventoryDropInventoryItems());
-        return playerManager.restore(player, resetPlayer, true, match.isOwnInventory());
+        final boolean restored = playerManager.restore(player, resetPlayer, true, match.isOwnInventory());
+        player.removePotionEffect(PotionEffectType.INVISIBILITY);
+        return restored;
     }
 
     public boolean forceEndMatch(final Player player, final Reason reason) {
@@ -530,6 +536,7 @@ public class DuelManager implements Loadable {
         if (!match.tryBeginFinishing()) {
             return false;
         }
+        finishMatchAccess(match);
         final List<Player> players = new ArrayList<>(match.getAllPlayers());
         for (final Player matchPlayer : players) {
             if (match.isDead(matchPlayer)) {
@@ -553,6 +560,7 @@ public class DuelManager implements Loadable {
         if (!match.tryBeginFinishing()) {
             return false;
         }
+        finishMatchAccess(match);
         for (final Player matchPlayer : new ArrayList<>(match.getAllPlayers())) {
             if (!match.isDead(matchPlayer)) {
                 handleTie(matchPlayer, arena, match, true);
@@ -636,6 +644,7 @@ public class DuelManager implements Loadable {
         final List<Player> preparedPlayers = new ArrayList<>(players.size());
         try {
             match = arena.startMatch(kit, items, settings, source);
+            grantMatchAccess(match, players);
             if (kit != null && kit.getDestructibleArena().isEnabled()
                     && plugin.getDestructibleArenaService().start(match, matchType, players) == null) {
                 throw new IllegalStateException("Could not reserve destructible arena session");
@@ -701,6 +710,8 @@ public class DuelManager implements Loadable {
                 player.setAllowFlight(false);
             }
 
+            resetPlayerScale(player);
+
             player.closeInventory();
             final boolean dropOwnInv = match.isOwnInventory() && config.isOwnInventoryDropInventoryItems();
             // If using own inventory (regardless of drop setting), do not restore experience to preserve XP changes
@@ -730,6 +741,7 @@ public class DuelManager implements Loadable {
                 if (config.isKitGuardEmbedOwner())
                     Identifiers.tagOwnerInInventory(player);
             }
+            player.removePotionEffect(PotionEffectType.INVISIBILITY);
 
             if (config.isStartCommandsEnabled() && !(match.getSource() == null && config.isStartCommandsQueueOnly())) {
                 try {
@@ -763,6 +775,9 @@ public class DuelManager implements Loadable {
     private void rollbackMatchStart(final ArenaImpl arena, final DuelMatch match, final Collection<Player> players,
                                     final Collection<Player> preparedPlayers, final Map<UUID, List<ItemStack>> items,
                                     final int bet, final boolean betWithdrawn, final RuntimeException failure) {
+        if (match != null) {
+            finishMatchAccess(match);
+        }
         for (final Player player : preparedPlayers) {
             final boolean resetPlayer = match == null
                     || !(match.isOwnInventory() && config.isOwnInventoryDropInventoryItems());
@@ -794,6 +809,44 @@ public class DuelManager implements Loadable {
             Log.error("Could not prepare duel on arena " + arena.getName()
                     + ". Player state and match resources were rolled back.", failure);
         }
+    }
+
+    private void grantMatchAccess(final DuelMatch match, final Collection<Player> players) {
+        final WorldGuardHook worldGuard = plugin.getHookManager().getHook(WorldGuardHook.class);
+        final World world = match.getArena().getPosition(1) == null ? null : match.getArena().getPosition(1).getWorld();
+        if (worldGuard == null || world == null) {
+            return;
+        }
+        for (Player player : players) {
+            final DuelMatch.WorldGuardAccessKey key = new DuelMatch.WorldGuardAccessKey(player.getUniqueId(), world.getUID());
+            match.getWorldGuardAccess().putIfAbsent(key, worldGuard.enableBypass(player, world));
+        }
+    }
+
+    public void finishMatchAccess(final DuelMatch match) {
+        if (match == null || match.getWorldGuardAccess().isEmpty()) {
+            if (match != null) {
+                match.getAllPlayers().forEach(this::resetPlayerScale);
+            }
+            return;
+        }
+        final WorldGuardHook worldGuard = plugin.getHookManager().getHook(WorldGuardHook.class);
+        for (Map.Entry<DuelMatch.WorldGuardAccessKey, WorldGuardHandler.BypassState> entry
+                : new ArrayList<>(match.getWorldGuardAccess().entrySet())) {
+            final DuelMatch.WorldGuardAccessKey key = entry.getKey();
+            if (worldGuard != null) {
+                worldGuard.restoreBypass(key.playerId(), key.worldId(), entry.getValue());
+            }
+            match.getWorldGuardAccess().remove(key);
+        }
+        match.getAllPlayers().forEach(this::resetPlayerScale);
+    }
+
+    private void resetPlayerScale(final Player player) {
+        if (player == null || Bukkit.getPluginManager().getPlugin("CMI") == null) {
+            return;
+        }
+        Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "pscale " + player.getName() + " 1");
     }
 
     private class DuelListener implements Listener {
@@ -885,17 +938,14 @@ public class DuelManager implements Loadable {
             inventoryManager.create(player, true);
 
             if (config.isSendDeathMessages()) {
-                final Player killer = player.getKiller();
-
-                if (killer != null) {
-                    final double health = Math.ceil(killer.getHealth()) * 0.5;
-                    if (tournamentMatch) {
-                        plugin.getTournamentManager().sendTournamentDeathMessage(match, player, killer, health);
-                    } else {
-                        arena.broadcast(lang.getMessage("DUEL.on-death.with-killer", "name", player.getName(), "killer", killer.getName(), "health", health));
-                    }
+                if (tournamentMatch) {
+                    plugin.getTournamentManager().sendTournamentDeathMessage(match, player);
                 } else {
-                    if (!tournamentMatch) {
+                    final Player killer = player.getKiller();
+                    if (killer != null && !killer.getUniqueId().equals(player.getUniqueId())) {
+                        final double health = Math.ceil(killer.getHealth()) * 0.5;
+                        arena.broadcast(lang.getMessage("DUEL.on-death.with-killer", "name", player.getName(), "killer", killer.getName(), "health", health));
+                    } else {
                         arena.broadcast(lang.getMessage("DUEL.on-death.no-killer", "name", player.getName()));
                     }
                 }
@@ -1017,17 +1067,17 @@ public class DuelManager implements Loadable {
 
         @EventHandler(ignoreCancelled = true)
         public void on(final PlayerDropItemEvent event) {
-            Player player = event.getPlayer();
-            if (!arenaManager.isInMatch(event.getPlayer())) {
+            final Player player = event.getPlayer();
+            final ArenaImpl arena = arenaManager.get(player);
+            final boolean activeMatch = arena != null && arena.getMatch() != null
+                    && arena.getMatch().getLifecycleState() == MatchLifecycleState.ACTIVE;
+            final boolean activeTournament = plugin.getTournamentManager() != null
+                    && plugin.getTournamentManager().isActiveParticipant(player);
+            if (!activeMatch && !activeTournament) {
                 return;
             }
-            if(config.isPreventItemDrop()) {
-                event.setCancelled(true);
-                lang.sendMessage(event.getPlayer(), "DUEL.prevent.item-drop");
-            }else if(config.isClearItemsAfterMatch()) {
-                arenaManager.get(player).getMatch().droppedItems.add(event.getItemDrop());
-            }
-
+            event.setCancelled(true);
+            lang.sendMessage(player, "DUEL.prevent.item-drop");
         }
 
         @EventHandler(ignoreCancelled = true)
@@ -1046,10 +1096,26 @@ public class DuelManager implements Loadable {
 
         @EventHandler(ignoreCancelled = true)
         public void on(final PlayerCommandPreprocessEvent event) {
+            // Server operators must always retain full administrative command access,
+            // including while they are participating in an active duel.
+            if (event.getPlayer().isOp()) {
+                return;
+            }
+
             final String command = event.getMessage().substring(1).split(" ")[0].toLowerCase();
 
-            if (!arenaManager.isInMatch(event.getPlayer())
-                    || (config.isBlockAllCommands() ? config.getWhitelistedCommands().contains(command) : !config.getBlacklistedCommands().contains(command))) {
+            final String fullCommand = event.getMessage().substring(1).trim().toLowerCase(Locale.ROOT);
+            final boolean blocked = config.getBlacklistedCommands().stream()
+                    .map(value -> value.toLowerCase(Locale.ROOT).trim())
+                    .anyMatch(value -> fullCommand.equals(value) || fullCommand.startsWith(value + " "));
+
+            final ArenaImpl arena = arenaManager.get(event.getPlayer());
+            final boolean activeMatch = arena != null && arena.getMatch() != null
+                    && arena.getMatch().getLifecycleState() == MatchLifecycleState.ACTIVE;
+            final boolean whitelisted = config.getWhitelistedCommands().stream()
+                    .map(value -> value.toLowerCase(Locale.ROOT).trim())
+                    .anyMatch(command::equals);
+            if (!activeMatch || (config.isBlockAllCommands() ? whitelisted : !blocked)) {
                 return;
             }
 

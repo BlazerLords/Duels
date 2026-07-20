@@ -60,13 +60,17 @@ public class DuelCountdown implements Runnable {
 
     protected void sendMessage(final String rawMessage, final String message, final String title) {
         final String kitName = match.getKit() != null ? match.getKit().getName() : lang.getMessage("GENERAL.none");
+        final boolean tournamentMatch = plugin.getTournamentManager() != null
+                && plugin.getTournamentManager().isTournamentMatch(match);
 
         arena.getPlayers().forEach(player -> {
             config.playSound(player, rawMessage);
 
             final Pair<String, Integer> info = this.info.get(player.getUniqueId());
 
-            if (info != null) {
+            if (tournamentMatch) {
+                // TournamentManager already sends the pair, round, kit and arena details.
+            } else if (info != null) {
                 player.sendMessage(message
                     .replace("%opponent%", info.getKey())
                     .replace("%opponent_rating%", String.valueOf(info.getValue()))

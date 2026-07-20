@@ -5,8 +5,10 @@ import com.meteordevelopments.duels.config.Config;
 import com.meteordevelopments.duels.util.hook.PluginHook;
 import com.meteordevelopments.duels.util.reflect.ReflectionUtil;
 import org.bukkit.entity.Player;
+import org.bukkit.World;
 
 import java.util.Collection;
+import java.util.UUID;
 
 public class WorldGuardHook extends PluginHook<DuelsPlugin> {
 
@@ -33,5 +35,13 @@ public class WorldGuardHook extends PluginHook<DuelsPlugin> {
         }
 
         return handler.findRegion(player, allowedRegions);
+    }
+
+    public WorldGuardHandler.BypassState enableBypass(final Player player, final World world) {
+        return handler.enableBypass(player, world);
+    }
+
+    public void restoreBypass(final UUID playerId, final UUID worldId, final WorldGuardHandler.BypassState state) {
+        handler.restoreBypass(playerId, worldId, state);
     }
 }
