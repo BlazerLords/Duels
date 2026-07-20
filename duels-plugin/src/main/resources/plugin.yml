@@ -1,7 +1,7 @@
 name: Duels
 main: com.meteordevelopments.duels.DuelsPlugin
 version: @VERSION@
-softdepend: [ AxGraves, BountyHunters, CombatLogX, CombatTagPlus, DeluxeCombat, Essentials, Factions, LeaderHeads, mcMMO, MVdWPlaceholderAPI, MyPet, PlaceholderAPI, NotBounties, PvPManager, SimpleClans, Vault, WorldGuard, Multiverse-Core, My_Worlds, MultiWorld ]
+softdepend: [ AxGraves, BountyHunters, CombatLogX, CombatTagPlus, DeluxeCombat, Essentials, Factions, FancyNpcs, HeadDB, LeaderHeads, mcMMO, MVdWPlaceholderAPI, MyPet, PlaceholderAPI, NotBounties, PvPManager, SimpleClans, Vault, WorldGuard, Multiverse-Core, My_Worlds, MultiWorld ]
 # Multiverse-Core added as soft-depend due to locations being null when Duels is loaded first.
 # Add any world management plugins to softdepend list if arena doesn't load properly in the generated world.
 api-version: 1.13
@@ -9,6 +9,29 @@ api-version: 1.13
 author: Realized, DUMBO
 website: https://www.spigotmc.org/resources/duelsoptimised.118881/
 description: An ultimate solution to server owners wanting to create a duel system.
+
+commands:
+  duel:
+    aliases: [ 1v1 ]
+    description: Main duel command.
+  party:
+    aliases: [ p, duelparty, dp ]
+    description: Duel party command.
+  queue:
+    aliases: [ q ]
+    description: Duel queue command.
+  spectate:
+    aliases: [ spec ]
+    description: Spectate active duels.
+  duels:
+    aliases: [ ds ]
+    description: Duels admin command.
+  kit:
+    aliases: [ dkit ]
+    description: Kit command.
+  tournament:
+    aliases: [ tour ]
+    description: Tournament command.
 
 permissions:
   duels.*:
@@ -32,5 +55,50 @@ permissions:
       duels.top: true
   duels.duel:
     default: true
+  tournament.admin:
+    default: op
+    children:
+      tournament.create: true
+      tournament.delete: true
+      tournament.add: true
+      tournament.remove: true
+      tournament.start: true
+      tournament.cancel: true
+      tournament.finish: true
+      tournament.win: true
+      tournament.replay: true
+      tournament.holo: true
+      tournament.join: true
+      tournament.spectate: true
+      tournament.spectate.admin: true
+      tournament.setlobby: true
+  tournament.create:
+    default: op
+  tournament.delete:
+    default: op
+  tournament.add:
+    default: op
+  tournament.remove:
+    default: op
+  tournament.start:
+    default: op
+  tournament.cancel:
+    default: op
+  tournament.finish:
+    default: op
+  tournament.win:
+    default: op
+  tournament.replay:
+    default: op
+  tournament.holo:
+    default: op
+  tournament.join:
+    default: true
+  tournament.spectate:
+    default: true
+  tournament.spectate.admin:
+    default: op
+  tournament.setlobby:
+    default: op
 
 folia-supported: true

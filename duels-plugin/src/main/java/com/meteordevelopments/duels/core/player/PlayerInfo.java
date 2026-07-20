@@ -9,6 +9,7 @@ import org.bukkit.Location;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.potion.PotionEffect;
+import org.bukkit.potion.PotionEffectType;
 
 import java.util.*;
 
@@ -28,7 +29,9 @@ public class PlayerInfo {
     private Location location;
 
     public PlayerInfo(final List<PotionEffect> effects, final double health, final float experience, final int level, final int hunger, final Location location, final boolean restoreExperience) {
-        this.effects = effects;
+        this.effects = effects.stream()
+                .filter(effect -> !effect.getType().equals(PotionEffectType.INVISIBILITY))
+                .toList();
         this.health = health;
         this.experience = experience;
         this.level = level;

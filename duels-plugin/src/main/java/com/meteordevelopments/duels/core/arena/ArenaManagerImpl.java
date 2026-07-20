@@ -39,6 +39,7 @@ import org.jetbrains.annotations.Nullable;
 import java.io.*;
 import java.util.*;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class ArenaManagerImpl implements Loadable, ArenaManager {
 
@@ -53,6 +54,7 @@ public class ArenaManagerImpl implements Loadable, ArenaManager {
     private final File file;
 
     private final List<ArenaImpl> arenas = new ArrayList<>();
+    private final Map<UUID, ArenaImpl> playerArenas = new ConcurrentHashMap<>();
 
     @Getter
     private MultiPageGui<DuelsPlugin> gui;
@@ -101,6 +103,7 @@ public class ArenaManagerImpl implements Loadable, ArenaManager {
             plugin.getGuiListener().removeGui(gui);
         }
         arenas.clear();
+        playerArenas.clear();
     }
 
     void saveArenas() {
@@ -133,12 +136,23 @@ public class ArenaManagerImpl implements Loadable, ArenaManager {
     @Override
     public ArenaImpl get(@NotNull final Player player) {
         Objects.requireNonNull(player, "player");
-        for (ArenaImpl arena : arenas) {
-            if (arena.has(player)) {
-                return arena;
+        final UUID uuid = player.getUniqueId();
+        final ArenaImpl indexed = playerArenas.get(uuid);
+        if (indexed != null) {
+            if (indexed.has(player)) {
+                return indexed;
             }
+            playerArenas.remove(uuid, indexed);
         }
         return null;
+    }
+
+    void indexPlayer(final Player player, final ArenaImpl arena) {
+        playerArenas.put(player.getUniqueId(), arena);
+    }
+
+    void clearPlayerIndex(final Collection<Player> players, final ArenaImpl arena) {
+        players.forEach(player -> playerArenas.remove(player.getUniqueId(), arena));
     }
 
     @Override
@@ -166,6 +180,7 @@ public class ArenaManagerImpl implements Loadable, ArenaManager {
 
     public boolean remove(final CommandSender source, final ArenaImpl arena) {
         if (arenas.remove(arena)) {
+            playerArenas.entrySet().removeIf(entry -> entry.getValue() == arena);
             arena.setRemoved(true);
             saveArenas();
             Bukkit.getPluginManager().callEvent(new ArenaRemoveEvent(source, arena));

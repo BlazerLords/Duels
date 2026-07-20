@@ -10,6 +10,7 @@ import com.meteordevelopments.duels.api.event.spectate.SpectateEndEvent;
 import com.meteordevelopments.duels.api.event.spectate.SpectateStartEvent;
 import com.meteordevelopments.duels.api.spectate.SpectateManager;
 import com.meteordevelopments.duels.api.spectate.Spectator;
+import com.meteordevelopments.duels.api.folialib.task.WrappedTask;
 import com.meteordevelopments.duels.core.arena.ArenaImpl;
 import com.meteordevelopments.duels.core.arena.ArenaManagerImpl;
 import com.meteordevelopments.duels.core.match.DuelMatch;
@@ -17,7 +18,6 @@ import com.meteordevelopments.duels.config.Config;
 import com.meteordevelopments.duels.config.Lang;
 import com.meteordevelopments.duels.hook.hooks.EssentialsHook;
 import com.meteordevelopments.duels.hook.hooks.MyPetHook;
-import com.meteordevelopments.duels.core.player.PlayerInfo;
 import com.meteordevelopments.duels.core.player.PlayerInfoManager;
 import com.meteordevelopments.duels.core.teleport.Teleport;
 import com.meteordevelopments.duels.util.BlockUtil;
@@ -36,6 +36,7 @@ import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.player.*;
 import org.bukkit.event.player.PlayerTeleportEvent.TeleportCause;
 import org.bukkit.event.vehicle.VehicleDamageEvent;
+import com.destroystokyo.paper.event.player.PlayerStartSpectatingEntityEvent;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 import org.jetbrains.annotations.NotNull;
@@ -61,6 +62,7 @@ public class SpectateManagerImpl implements Loadable, SpectateManager {
     private Teleport teleport;
     private MyPetHook myPet;
     private EssentialsHook essentials;
+    private WrappedTask boundsTask;
 
     public SpectateManagerImpl(final DuelsPlugin plugin) {
         this.plugin = plugin;
@@ -78,11 +80,46 @@ public class SpectateManagerImpl implements Loadable, SpectateManager {
         this.teleport = plugin.getTeleport();
         this.myPet = plugin.getHookManager().getHook(MyPetHook.class);
         this.essentials = plugin.getHookManager().getHook(EssentialsHook.class);
+        this.boundsTask = plugin.doSyncRepeat(this::enforceSpectatorBounds, 10L, 10L);
     }
 
     @Override
     public void handleUnload() {
+        if (boundsTask != null && !boundsTask.isCancelled()) {
+            plugin.cancelTask(boundsTask);
+        }
+        boundsTask = null;
+        for (SpectatorImpl spectator : new ArrayList<>(spectators.values())) {
+            final Player player = Bukkit.getPlayer(spectator.getUuid());
+            if (player != null) {
+                stopSpectating(player, spectator);
+            }
+        }
         spectators.clear();
+        arenas.clear();
+    }
+
+    private void enforceSpectatorBounds() {
+        for (SpectatorImpl spectator : new ArrayList<>(spectators.values())) {
+            final Player player = spectator.getPlayer();
+            final ArenaImpl arena = spectator.getArena();
+            if (player == null || !player.isOnline()) {
+                continue;
+            }
+            if (player.getSpectatorTarget() != null) {
+                player.setSpectatorTarget(null);
+            }
+            if (!arena.hasBounds() || arena.isInBounds(player.getLocation())) {
+                continue;
+            }
+            final Player target = spectator.getTarget();
+            final org.bukkit.Location destination = target != null && arena.isInBounds(target.getLocation())
+                    ? target.getLocation().clone().add(0D, 2D, 0D)
+                    : arena.getPosition(1);
+            if (destination != null) {
+                teleport.tryTeleport(player, destination);
+            }
+        }
     }
 
     @Nullable
@@ -146,6 +183,15 @@ public class SpectateManagerImpl implements Loadable, SpectateManager {
                     });
         }
 
+        // Spectators must see one another immediately. Fighters are hidden separately above.
+        for (final SpectatorImpl existing : getSpectatorsImpl(arena)) {
+            final Player existingPlayer = existing.getPlayer();
+            if (existingPlayer != null && existingPlayer.isOnline()) {
+                showPlayer(existingPlayer, player);
+                showPlayer(player, existingPlayer);
+            }
+        }
+
         // Remove pet before teleport
         if (myPet != null) {
             myPet.removePet(player);
@@ -161,22 +207,14 @@ public class SpectateManagerImpl implements Loadable, SpectateManager {
         arenas.put(arena, spectator);
 
         DuelsPlugin.getFoliaLib().getScheduler().runAtEntity(player, task -> {
-            if (!config.isSpecUseSpectatorGamemode()) {
-                player.setGameMode(GameMode.ADVENTURE);
-                player.setAllowFlight(true);
-                player.setFlying(true);
-            } else {
-                player.setGameMode(GameMode.SPECTATOR);
-            }
+            player.setGameMode(GameMode.SPECTATOR);
 
             player.setCollidable(false);
 
-            if (config.isSpecAddInvisibilityEffect()) {
-                player.addPotionEffect(new PotionEffect(PotionEffectType.INVISIBILITY, Integer.MAX_VALUE, 1, false, false));
-            }
+            player.removePotionEffect(PotionEffectType.INVISIBILITY);
 
-            // Broadcast to the arena that player has begun spectating if player does not have the SPEC_ANON permission.
-            if (!player.hasPermission(Permissions.SPEC_ANON)) {
+            // Tournament spectating can hide join messages from fighters while keeping /spec behavior configurable.
+            if (!config.isSpecHideJoinMessageFromFighters() && !player.hasPermission(Permissions.SPEC_ANON)) {
                 arena.getMatch().getAllPlayers().forEach(matchPlayer -> lang.sendMessage(matchPlayer, "SPECTATE.arena-broadcast", "name", player.getName()));
             }
         });
@@ -199,14 +237,12 @@ public class SpectateManagerImpl implements Loadable, SpectateManager {
 
         player.setCollidable(true);
 
-        final PlayerInfo info = playerManager.remove(player);
-
-        if (info != null) {
-            teleport.tryTeleport(player, info.getLocation());
-            info.restore(player);
+        if (playerManager.get(player) != null) {
+            playerManager.restore(player, false, true, false);
         } else {
             teleport.tryTeleport(player, playerManager.getLobby());
         }
+        player.removePotionEffect(PotionEffectType.INVISIBILITY);
 
         final DuelMatch match = spectator.getArena().getMatch();
 
@@ -224,8 +260,36 @@ public class SpectateManagerImpl implements Loadable, SpectateManager {
                     });
         }
 
+        for (final SpectatorImpl existing : getSpectatorsImpl(spectator.getArena())) {
+            final Player existingPlayer = existing.getPlayer();
+            if (existingPlayer == null || !existingPlayer.isOnline()) {
+                continue;
+            }
+            showPlayer(existingPlayer, player);
+            showPlayer(player, existingPlayer);
+        }
+
         final SpectateEndEvent event = new SpectateEndEvent(player, spectator);
         Bukkit.getPluginManager().callEvent(event);
+    }
+
+    private void hidePlayer(final Player viewer, final Player hidden) {
+        if (!viewer.canSee(hidden)) {
+            return;
+        }
+        if (CompatUtil.hasHidePlayer()) {
+            viewer.hidePlayer(plugin, hidden);
+        } else {
+            viewer.hidePlayer(hidden);
+        }
+    }
+
+    private void showPlayer(final Player viewer, final Player hidden) {
+        if (CompatUtil.hasHidePlayer()) {
+            viewer.showPlayer(plugin, hidden);
+        } else {
+            viewer.showPlayer(hidden);
+        }
     }
 
     /**
@@ -255,7 +319,7 @@ public class SpectateManagerImpl implements Loadable, SpectateManager {
             final Player player = Bukkit.getPlayer(spectator.getUuid());
 
             if (player == null) {
-                // Spectator went offline before match ended — clean up dangling UUID entry
+                // Spectator went offline before match ended; clean up dangling UUID entry
                 SpectateManagerImpl.this.spectators.remove(spectator.getUuid());
                 return;
             }
@@ -308,7 +372,7 @@ public class SpectateManagerImpl implements Loadable, SpectateManager {
 
             final String command = event.getMessage().substring(1).split(" ")[0].toLowerCase();
 
-            if (command.equalsIgnoreCase("spectate") || command.equalsIgnoreCase("spec") || config.getSpecWhitelistedCommands().contains(command)) {
+            if (command.equalsIgnoreCase("spectate") || command.equalsIgnoreCase("spec") || command.equalsIgnoreCase("tournament") || command.equalsIgnoreCase("tour") || config.getSpecWhitelistedCommands().contains(command)) {
                 return;
             }
 
@@ -328,7 +392,17 @@ public class SpectateManagerImpl implements Loadable, SpectateManager {
             }
 
             event.setCancelled(true);
-            lang.sendMessage(player, "SPECTATE.prevent.teleportation");
+            if (event.getCause() != TeleportCause.SPECTATE) {
+                lang.sendMessage(player, "SPECTATE.prevent.teleportation");
+            }
+        }
+
+        @EventHandler(ignoreCancelled = true)
+        public void on(final PlayerStartSpectatingEntityEvent event) {
+            if (!isSpectating(event.getPlayer())) {
+                return;
+            }
+            event.setCancelled(true);
         }
 
 

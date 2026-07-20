@@ -12,6 +12,7 @@ import com.meteordevelopments.duels.core.arena.ArenaImpl;
 import com.meteordevelopments.duels.core.kit.KitImpl;
 import com.meteordevelopments.duels.party.PartyManagerImpl;
 import com.meteordevelopments.duels.core.queue.Queue;
+import com.meteordevelopments.duels.hook.hooks.worldguard.WorldGuardHandler;
 import org.bukkit.Location;
 import org.bukkit.block.Block;
 import org.bukkit.block.data.BlockData;
@@ -43,6 +44,8 @@ public class DuelMatch implements Match {
 
     @Getter
     private boolean finished;
+    @Getter
+    private MatchLifecycleState lifecycleState = MatchLifecycleState.CREATED;
 
     // Round tracking for ROUNDS3 characteristic
     @Getter
@@ -58,6 +61,7 @@ public class DuelMatch implements Match {
     // Default value for players is false, which is set to true if player is killed in the match.
     private final Map<Player, Boolean> players = new HashMap<>();
     private final Map<UUID, Location> spawnPoints = new HashMap<>();
+    private final Map<WorldGuardAccessKey, WorldGuardHandler.BypassState> worldGuardAccess = new LinkedHashMap<>();
 
     public DuelMatch(final DuelsPlugin plugin, final ArenaImpl arena, final KitImpl kit, final Map<UUID, List<ItemStack>> items, final int bet, final Queue source) {
         this.partyManager = plugin.getPartyManager();
@@ -85,6 +89,49 @@ public class DuelMatch implements Match {
         finished = true;
     }
 
+    public synchronized boolean markPreparing() {
+        return transition(MatchLifecycleState.PREPARING, MatchLifecycleState.CREATED);
+    }
+
+    public synchronized boolean markActive() {
+        return transition(MatchLifecycleState.ACTIVE, MatchLifecycleState.PREPARING);
+    }
+
+    public synchronized boolean tryBeginFinishing() {
+        return transition(MatchLifecycleState.FINISHING,
+                MatchLifecycleState.CREATED, MatchLifecycleState.PREPARING, MatchLifecycleState.ACTIVE);
+    }
+
+    public synchronized boolean tryBeginRestoring() {
+        return transition(MatchLifecycleState.RESTORING, MatchLifecycleState.FINISHING);
+    }
+
+    public synchronized boolean markCompleted() {
+        return transition(MatchLifecycleState.COMPLETED, MatchLifecycleState.RESTORING);
+    }
+
+    public synchronized boolean markCancelled() {
+        return transition(MatchLifecycleState.CANCELLED,
+                MatchLifecycleState.CREATED, MatchLifecycleState.PREPARING, MatchLifecycleState.ACTIVE,
+                MatchLifecycleState.FINISHING, MatchLifecycleState.RESTORING);
+    }
+
+    public synchronized boolean markError() {
+        return transition(MatchLifecycleState.ERROR,
+                MatchLifecycleState.CREATED, MatchLifecycleState.PREPARING, MatchLifecycleState.ACTIVE,
+                MatchLifecycleState.FINISHING, MatchLifecycleState.RESTORING);
+    }
+
+    private boolean transition(MatchLifecycleState target, MatchLifecycleState... allowed) {
+        for (MatchLifecycleState state : allowed) {
+            if (lifecycleState == state) {
+                lifecycleState = target;
+                return true;
+            }
+        }
+        return false;
+    }
+
     public void addPlayer(final Player player) {
         players.put(player, false);
     }
@@ -95,6 +142,13 @@ public class DuelMatch implements Match {
 
     public Location getSpawnPoint(Player player) {
         return spawnPoints.get(player.getUniqueId());
+    }
+
+    public Map<WorldGuardAccessKey, WorldGuardHandler.BypassState> getWorldGuardAccess() {
+        return worldGuardAccess;
+    }
+
+    public record WorldGuardAccessKey(UUID playerId, UUID worldId) {
     }
 
     public void markAsDead(final Player player) {
@@ -172,6 +226,9 @@ public class DuelMatch implements Match {
     }
 
     public void handleMatchEnd(Player winner, Player loser) {
+        if (!tryBeginFinishing()) {
+            return;
+        }
         // Mark loser as dead
         markAsDead(loser);
 
@@ -184,6 +241,8 @@ public class DuelMatch implements Match {
         winner.setVelocity(new org.bukkit.util.Vector(0, 0, 0));
 
         // Set match as finished
+        tryBeginRestoring();
         setFinished();
+        markCompleted();
     }
 }

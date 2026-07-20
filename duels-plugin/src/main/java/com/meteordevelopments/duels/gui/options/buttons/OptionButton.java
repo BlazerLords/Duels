@@ -23,7 +23,7 @@ public class OptionButton extends BaseButton {
         this.gui = gui;
         this.kit = kit;
         this.option = option;
-        setDisplayName(plugin.getLang().getMessage("GUI.options.buttons.option.name", "name", option.name().toLowerCase()), plugin.getLang());
+        setDisplayName(plugin.getLang().getMessage("GUI.options.buttons.option.name", "name", option.getDisplayName()), plugin.getLang());
         update();
     }
 
@@ -34,7 +34,7 @@ public class OptionButton extends BaseButton {
         final List<String> lore = new ArrayList<>();
 
         for (final String line : option.getDescription()) {
-            lore.add("&f" + line.replace("%kit%", kit.getName()));
+            lore.add("&7" + line.replace("%kit%", kit.getName()));
         }
 
         Collections.addAll(lore,

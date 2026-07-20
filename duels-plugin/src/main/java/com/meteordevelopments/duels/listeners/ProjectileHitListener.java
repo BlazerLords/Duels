@@ -4,7 +4,6 @@ import com.meteordevelopments.duels.DuelsPlugin;
 import com.meteordevelopments.duels.core.arena.ArenaManagerImpl;
 import com.meteordevelopments.duels.config.Config;
 import com.meteordevelopments.duels.config.Lang;
-import org.bukkit.Bukkit;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
@@ -30,7 +29,7 @@ public class ProjectileHitListener implements Listener {
         this.arenaManager = plugin.getArenaManager();
 
         if (plugin.getConfiguration().isProjectileHitMessageEnabled()) {
-            Bukkit.getPluginManager().registerEvents(this, plugin);
+            plugin.registerListener(this);
         }
     }
 

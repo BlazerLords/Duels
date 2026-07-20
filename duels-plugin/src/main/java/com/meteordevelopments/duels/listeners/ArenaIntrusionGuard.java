@@ -10,16 +10,15 @@ import com.meteordevelopments.duels.util.StringUtil;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.entity.Player;
-import org.bukkit.scheduler.BukkitRunnable;
 
 import java.util.ArrayList;
 import java.util.List;
 
 // AI generated
-public class ArenaIntrusionGuard extends BukkitRunnable {
+public class ArenaIntrusionGuard implements Runnable {
 
     private static final long INTERVAL_TICKS = 60L;
-    private static final String MSG_PLAYER = "&c[Duels] You were removed from an active arena.";
+    private static final String MSG_PLAYER = "&c[Duels] Вы были перемещены за пределы активной арены.";
 
     private final ArenaManagerImpl arenaManager;
     private final SpectateManagerImpl spectateManager;
@@ -27,7 +26,7 @@ public class ArenaIntrusionGuard extends BukkitRunnable {
     public ArenaIntrusionGuard(DuelsPlugin plugin) {
         this.arenaManager = plugin.getArenaManager();
         this.spectateManager = plugin.getSpectateManager();
-        runTaskTimer(plugin, INTERVAL_TICKS, INTERVAL_TICKS);
+        plugin.doSyncRepeat(this, INTERVAL_TICKS, INTERVAL_TICKS);
     }
 
     @Override
@@ -37,7 +36,7 @@ public class ArenaIntrusionGuard extends BukkitRunnable {
             return;
 
         for (Player player: Bukkit.getOnlinePlayers()) {
-            if (isExempt(player))
+            if (isExempt(player, active))
                 continue;
             Location loc = player.getLocation();
             for (ArenaImpl arena: active) {
@@ -58,10 +57,10 @@ public class ArenaIntrusionGuard extends BukkitRunnable {
         return result;
     }
 
-    private boolean isExempt(Player player) {
+    private boolean isExempt(Player player, List<ArenaImpl> active) {
         return player.hasPermission(Permissions.ADMIN)
                 || player.isOp()
-                || arenaManager.isInMatch(player)
+                || active.stream().anyMatch(arena -> arena.hasParticipant(player))
                 || spectateManager.isSpectating(player);
     }
 

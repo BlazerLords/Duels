@@ -314,7 +314,7 @@ duel:
 
   # If set to 'true', players in duel will not be able to drop items.
   # default: false
-  prevent-item-drop: false
+  prevent-item-drop: true
   clear-items-after-duel: true
 
   # If set to 'true', players in duel will not be able to pickup items on the ground.
@@ -339,6 +339,13 @@ duel:
   # List of commands to allow while in a duel.
   # NOTE: Only active if 'block-all-commands' is enabled!
   whitelisted-commands:
+    - 'duel'
+    - '1v1'
+    - 'duels'
+    - 'tour'
+    - 'tournament'
+    - 'spec'
+    - 'spectate'
     - 'msg'
     - 'r'
     - 'w'
@@ -355,6 +362,16 @@ duel:
   # List of commands to block while in a duel.
   # NOTE: Only active if 'block-all-commands' is disabled!
   blacklisted-commands:
+    - 'crazyactions'
+    - 'ah sell'
+    - 'ah bid'
+    - 'pscale'
+    - 'spawn'
+    - 'market'
+    - 'tpaccept'
+    - 'tpa'
+    - 'tphere'
+    - 'marry'
     - 'heal'
     - 'eheal'
     - 'essentials:heal'
@@ -471,6 +488,14 @@ rating:
 
 
 spectate:
+  enabled: true
+  allow-players: true
+  permission: "tournament.spectate"
+  hide-join-message-from-fighters: true
+  hide-join-message-from-spectators: false
+  allow-active-participants-to-spectate: false
+  command: "spec %player1% %player2%"
+
   # If set to 'true', players will be required to have a cleared inventory in order to start spectating.
   # default: false
   requires-cleared-inventory: false
@@ -481,8 +506,8 @@ spectate:
 
   # If set to 'true', players spectating will receive invisibility effect.
   # NOTE: This option will not take effect if use-spectator-gamemode is set to true.
-  # default: true
-  add-invisibility-effect: true
+  # default: false
+  add-invisibility-effect: false
 
   # List of commands to allow while spectating.
   whitelisted-commands:
@@ -784,3 +809,113 @@ no-opponent: 'No opponent'
 # MiniMessage supports modern formatting like <red>text</red>, <bold>text</bold>, gradients, etc.
 # default: false
 use-minimessages: false
+
+tournament:
+  auto-forfeit-minutes: 2
+  shuffle-players: true
+  allow-late-join: false
+  # false: pause the tournament match and wait auto-forfeit-minutes for reconnect.
+  # true: leaving an active fight is an immediate loss.
+  disconnect-loss: false
+  reserve-default-arena: true
+  broadcast-match-start: true
+  broadcast-match-result: true
+  send-final-results-to-participants: true
+  kit-selection:
+    enabled: true
+    seconds: 30
+    timer-display: "ACTIONBAR" # ACTIONBAR or BOSSBAR
+    animation-seconds: 3
+    # Empty list means all existing Duels kits can be selected.
+    # Fill this list to restrict tournament matches to specific kits.
+    kits: []
+  fancy-npcs:
+    enabled: true
+    # Spawn this NPC in-game:
+    # /npc create tour_pvp --type PLAYER
+    # /npc skin tour_pvp Blazerlords
+    npc-tournaments:
+      tour_pvp: "Nether"
+    menu:
+      size: 27
+      decor:
+        border:
+          material: "BLACK_STAINED_GLASS_PANE"
+          name: " "
+          slots: [0,1,2,3,4,5,6,7,8,18,19,20,21,22,23,24,25,26]
+        trophy:
+          material: "NETHER_STAR"
+          head-db-id: 42035
+          name: "&6&lТурнир на выбывание"
+          lore:
+            - "&7Соревнование между игроками в формате"
+            - "&7олимпийской сетки: победитель проходит"
+            - "&7дальше, проигравший выбывает."
+            - " "
+            - "&7Через это меню можно зарегистрироваться,"
+            - "&7отменить участие до старта, посмотреть"
+            - "&7правила и перейти к наблюдению за матчем."
+          slots: [4]
+
+duels:
+  default-arena: "1"
+  start-command: "duel start %player1% %player2% %kit% %arena%"
+
+cmi-holograms:
+  enabled: true
+  hologram-name-format: "tournament_%name%"
+  create-command: "cmi hologram new %hologram%"
+  remove-command: "cmi hologram remove %hologram%"
+  setline-command: "cmi hologram setline %hologram% %line% %text%"
+
+hologram:
+  max-lines-per-page: 20
+  spacing: 3.0
+  panel-spacing: 5.0
+  direction: "AUTO"
+  manage-locations: true
+  use-offsets: false
+  offsets:
+    main:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+    active:
+      x: 3.0
+      y: 0.0
+      z: 0.0
+    next:
+      x: -3.0
+      y: 0.0
+      z: 0.0
+  show-only-current-round: true
+  show-finished-matches: true
+  show-bye-matches: false
+  auto-update: true
+
+hologram-template:
+  header:
+    - "&6&lТурнир: &e%tournament_name%"
+    - "&7Кит: &f%kit%"
+    - "&7Статус: %status%"
+    - "&7Текущий раунд: &f%current_round%"
+    - "&8&m--------------------"
+  match-line: "&f%round%.%match% &7| %player1% &8vs %player2% &7- %match_status%"
+  bye-line: "&f%round%.%match% &7| %player1% &aпрошёл дальше без соперника"
+  winner-line: "&f%round%.%match% &7| &a%winner% &7победил &c%loser%"
+  waiting-line: "&f%round%.%match% &7| &eОжидание игроков"
+  footer:
+    - "&8&m--------------------"
+    - "&7Страница: &f%page%&7/&f%max_page%"
+    - "&e/tour player %tournament_name%"
+    - "&e/tour spec %tournament_name%"
+# Destructible PvP arenas use only Bukkit/Paper API.
+destructible-arena:
+  restore:
+    # Global budget shared by all arenas. Large bounds are never scanned.
+    blocks-per-tick: 100
+    max-time-per-tick-ms: 2.0
+    disable-physics: true
+  recovery:
+    # Recovery snapshot for server crashes. 1200 ticks = 60 seconds.
+    snapshot-interval-ticks: 1200

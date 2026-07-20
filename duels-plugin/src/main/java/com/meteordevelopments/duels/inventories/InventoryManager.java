@@ -77,6 +77,10 @@ public class InventoryManager implements Loadable {
             return;
         }
 
+        if (plugin.getTournamentManager() != null && plugin.getTournamentManager().sendTournamentInventories(match)) {
+            return;
+        }
+
         String color = lang.getMessage("DUEL.inventories.name-color");
         final TextBuilder builder = TextBuilder.of(lang.getMessage("DUEL.inventories.message"));
         final Set<Player> players = match.getAllPlayers();

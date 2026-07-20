@@ -24,6 +24,21 @@ public final class Permissions {
     public static final String PARTY = "duels.party";
     public static final String PARTY_LIST_OTHERS = PARTY + ".list.others";
     public static final String PARTY_TOGGLE = PARTY + ".toggle";
+    public static final String TOURNAMENT_ADMIN = "tournament.admin";
+    public static final String TOURNAMENT_CREATE = "tournament.create";
+    public static final String TOURNAMENT_DELETE = "tournament.delete";
+    public static final String TOURNAMENT_ADD = "tournament.add";
+    public static final String TOURNAMENT_REMOVE = "tournament.remove";
+    public static final String TOURNAMENT_START = "tournament.start";
+    public static final String TOURNAMENT_CANCEL = "tournament.cancel";
+    public static final String TOURNAMENT_FINISH = "tournament.finish";
+    public static final String TOURNAMENT_WIN = "tournament.win";
+    public static final String TOURNAMENT_REPLAY = "tournament.replay";
+    public static final String TOURNAMENT_HOLO = "tournament.holo";
+    public static final String TOURNAMENT_JOIN = "tournament.join";
+    public static final String TOURNAMENT_SPECTATE = "tournament.spectate";
+    public static final String TOURNAMENT_SPECTATE_ADMIN = "tournament.spectate.admin";
+    public static final String TOURNAMENT_SET_LOBBY = "tournament.setlobby";
 
     private Permissions() {
     }

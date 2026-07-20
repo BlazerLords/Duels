@@ -27,6 +27,8 @@ import org.jetbrains.annotations.Nullable;
 import com.meteordevelopments.duels.api.folialib.task.WrappedTask;
 
 import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
@@ -97,23 +99,12 @@ public class UserManagerImpl implements Loadable, Listener, UserManager {
                         continue;
                     }
 
-                    try (Reader reader = new InputStreamReader(new FileInputStream(file))) {
-                        final UserData user = JsonUtil.getObjectMapper().readValue(reader, UserData.class);
+                    final UserData user = loadUser(file, fileName);
 
-                        if (user == null) {
-                            Log.warn(this, "Could not load userdata from file: " + fileName);
-                            continue;
-                        }
-
-                        user.folder = folder;
-                        user.defaultRating = defaultRating;
-                        user.matchesToDisplay = matchesToDisplay;
-                        user.refreshMatches();
+                    if (user != null) {
                         // Player might have logged in while reading the file
                         names.putIfAbsent(user.getName().toLowerCase(), uuid);
                         users.putIfAbsent(uuid, user);
-                    } catch (IOException ex) {
-                        Log.error(this, "Could not load userdata from file: " + fileName, ex);
                     }
                 }
             }
@@ -279,19 +270,45 @@ public class UserManagerImpl implements Loadable, Listener, UserManager {
                 .collect(Collectors.toList());
     }
 
-    private UserData tryLoad(final Player player) {
-        final File file = new File(folder, player.getUniqueId() + ".json");
+    private UserData tryLoad(final UUID uuid, final String playerName) {
+        final File file = new File(folder, uuid + ".json");
 
         if (!file.exists()) {
-            final UserData user = new UserData(folder, defaultRating, matchesToDisplay, player);
-            plugin.doSync(() -> Bukkit.getPluginManager().callEvent(new UserCreateEvent(user)));
-            return user;
+            return createUser(uuid, playerName);
+        }
+
+        final UserData user = loadUser(file, uuid + ".json");
+
+        if (user == null) {
+            Log.warn(this, "Creating fresh userdata for " + playerName + " because their saved file could not be loaded.");
+            return createUser(uuid, playerName);
+        }
+
+        if (!playerName.equals(user.getName())) {
+            user.setName(playerName);
+        }
+
+        return user;
+    }
+
+    private UserData createUser(final UUID uuid, final String playerName) {
+        final UserData user = new UserData(folder, defaultRating, matchesToDisplay, uuid, playerName);
+        plugin.doSync(() -> Bukkit.getPluginManager().callEvent(new UserCreateEvent(user)));
+        return user;
+    }
+
+    @Nullable
+    private UserData loadUser(final File file, final String fileName) {
+        if (!file.isFile() || file.length() <= 0L) {
+            quarantineUserFile(file, fileName, "empty or missing");
+            return null;
         }
 
         try (Reader reader = new InputStreamReader(new FileInputStream(file))) {
             final UserData user = JsonUtil.getObjectMapper().readValue(reader, UserData.class);
 
-            if (user == null) {
+            if (user == null || user.getUuid() == null || user.getName() == null || user.getName().isBlank()) {
+                quarantineUserFile(file, fileName, "invalid data");
                 return null;
             }
 
@@ -299,15 +316,27 @@ public class UserManagerImpl implements Loadable, Listener, UserManager {
             user.defaultRating = defaultRating;
             user.matchesToDisplay = matchesToDisplay;
             user.refreshMatches();
-
-            if (!player.getName().equals(user.getName())) {
-                user.setName(player.getName());
-            }
-
             return user;
         } catch (IOException ex) {
-            Log.error(this, "An error occured while loading userdata of " + player.getName() + "!", ex);
+            quarantineUserFile(file, fileName, "read error");
+            Log.error(this, "Could not load userdata from file: " + fileName, ex);
             return null;
+        }
+    }
+
+    private void quarantineUserFile(final File file, final String fileName, final String reason) {
+        if (!file.exists()) {
+            Log.warn(this, "Could not load userdata from file: " + fileName + " (" + reason + ")");
+            return;
+        }
+
+        final File backup = new File(folder, fileName + ".broken-" + System.currentTimeMillis());
+
+        try {
+            Files.move(file.toPath(), backup.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            Log.warn(this, "Could not load userdata from file: " + fileName + " (" + reason + "). Moved it to " + backup.getName());
+        } catch (IOException ex) {
+            Log.error(this, "Could not quarantine broken userdata file: " + fileName, ex);
         }
     }
 
@@ -324,6 +353,8 @@ public class UserManagerImpl implements Loadable, Listener, UserManager {
     @EventHandler
     public void on(final PlayerJoinEvent event) {
         final Player player = event.getPlayer();
+        final UUID uuid = player.getUniqueId();
+        final String playerName = player.getName();
 
         plugin.doSyncAfter(() -> {
             if (plugin.getUpdateManager() != null) {
@@ -333,27 +364,32 @@ public class UserManagerImpl implements Loadable, Listener, UserManager {
             }
         }, 5L);
 
-        final UserData user = users.get(player.getUniqueId());
+        final UserData user = users.get(uuid);
 
         if (user != null) {
-            if (!player.getName().equals(user.getName())) {
-                user.setName(player.getName());
-                names.put(player.getName().toLowerCase(), player.getUniqueId());
+            if (!playerName.equals(user.getName())) {
+                user.setName(playerName);
+                names.put(playerName.toLowerCase(), uuid);
             }
 
             return;
         }
 
         plugin.doAsync(() -> {
-            final UserData data = tryLoad(player);
+            final UserData data = tryLoad(uuid, playerName);
 
             if (data == null) {
-                lang.sendMessage(player, "ERROR.data.load-failure");
+                plugin.doSync(() -> {
+                    final Player onlinePlayer = Bukkit.getPlayer(uuid);
+                    if (onlinePlayer != null) {
+                        lang.sendMessage(onlinePlayer, "ERROR.data.load-failure");
+                    }
+                });
                 return;
             }
 
-            names.put(player.getName().toLowerCase(), player.getUniqueId());
-            users.put(player.getUniqueId(), data);
+            names.put(playerName.toLowerCase(), uuid);
+            users.put(uuid, data);
         });
     }
 
@@ -430,6 +466,10 @@ public class UserManagerImpl implements Loadable, Listener, UserManager {
         applyDuelCooldown(match.getAllPlayers());
 
         if (message == null) {
+            return;
+        }
+
+        if (plugin.getTournamentManager() != null && plugin.getTournamentManager().isTournamentMatch(match)) {
             return;
         }
 

@@ -15,6 +15,7 @@ import com.meteordevelopments.duels.core.teleport.Teleport;
 import com.meteordevelopments.duels.util.Loadable;
 import com.meteordevelopments.duels.util.Log;
 import com.meteordevelopments.duels.util.PlayerUtil;
+import com.meteordevelopments.duels.util.io.AtomicFileWriter;
 import com.meteordevelopments.duels.util.io.FileUtil;
 import com.meteordevelopments.duels.util.json.JsonUtil;
 import org.bukkit.Bukkit;
@@ -34,7 +35,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Manages:
@@ -57,7 +60,8 @@ public class PlayerInfoManager implements Loadable {
     private final File lobbyFile;
     private final File kitlobbyFile;
 
-    private final Map<UUID, PlayerInfo> cache = new HashMap<>();
+    private final Map<UUID, PlayerInfo> cache = new ConcurrentHashMap<>();
+    private final Set<UUID> restoring = ConcurrentHashMap.newKeySet();
 
     private Teleport teleport;
     private EssentialsHook essentials;
@@ -94,7 +98,9 @@ public class PlayerInfoManager implements Loadable {
                 }
             }
 
-            cacheFile.delete();
+            // Keep the recovery file until every snapshot has actually been restored.
+            // If the server crashes again before the player joins, the same snapshot
+            // must still be available on the following boot.
         }
 
         if (FileUtil.checkNonEmpty(lobbyFile, false)) {
@@ -138,32 +144,18 @@ public class PlayerInfoManager implements Loadable {
     @Override
     public void handleUnload() throws IOException {
         Bukkit.getOnlinePlayers().stream().filter(Player::isDead).forEach(player -> {
-            final PlayerInfo info = remove(player);
-
-            if (info != null) {
+            if (get(player) != null) {
                 player.spigot().respawn();
-                teleport.tryTeleport(player, info.getLocation());
-                PlayerUtil.reset(player);
-                info.restore(player);
+                restore(player, true, true, false);
             }
         });
 
-        if (cache.isEmpty()) {
-            return;
-        }
-
-        final Map<UUID, PlayerData> data = new HashMap<>();
-
-        for (final Map.Entry<UUID, PlayerInfo> entry : cache.entrySet()) {
-            data.put(entry.getKey(), PlayerData.fromPlayerInfo(entry.getValue()));
-        }
-
-        try (final Writer writer = new OutputStreamWriter(new FileOutputStream(cacheFile), Charsets.UTF_8)) {
-            JsonUtil.getObjectWriter().writeValue(writer, data);
-            writer.flush();
+        if (!persistRecoveryCache()) {
+            throw new IOException("Could not persist player recovery snapshots during plugin shutdown");
         }
 
         cache.clear();
+        restoring.clear();
     }
 
     /**
@@ -224,6 +216,7 @@ public class PlayerInfoManager implements Loadable {
         }
 
         cache.put(player.getUniqueId(), info);
+        persistRecoveryCache();
     }
 
     /**
@@ -241,6 +234,39 @@ public class PlayerInfoManager implements Loadable {
         }
 
         cache.put(player.getUniqueId(), info);
+        persistRecoveryCache();
+    }
+
+    /**
+     * Creates a recovery snapshot only when the player does not already have one.
+     * This prevents a second match preparation from overwriting the player's original state.
+     *
+     * @param player player whose current state should be cached
+     * @param excludeInventory whether inventory contents should be excluded
+     * @param restoreExperience whether experience and level should be restored
+     * @return true when a new snapshot was stored
+     */
+    public boolean createIfAbsent(final Player player, final boolean excludeInventory,
+                                  final boolean restoreExperience) {
+        final UUID uuid = player.getUniqueId();
+        if (cache.containsKey(uuid)) {
+            return false;
+        }
+
+        final PlayerInfo info = new PlayerInfo(player, excludeInventory, restoreExperience);
+        if (!config.isTeleportToLastLocation()) {
+            info.setLocation(lobby.clone());
+        }
+        if (cache.putIfAbsent(uuid, info) != null) {
+            return false;
+        }
+        if (persistRecoveryCache()) {
+            return true;
+        }
+
+        // Never start a match when its recovery snapshot was not durably saved.
+        cache.remove(uuid, info);
+        return false;
     }
 
     /**
@@ -259,7 +285,82 @@ public class PlayerInfoManager implements Loadable {
      * @return Removed PlayerInfo instance or null if not found
      */
     public PlayerInfo remove(final Player player) {
-        return cache.remove(player.getUniqueId());
+        final PlayerInfo removed = cache.remove(player.getUniqueId());
+        if (removed != null) {
+            persistRecoveryCache();
+        }
+        return removed;
+    }
+
+    /**
+     * Restores a cached player snapshot and removes it only after every requested operation succeeds.
+     * Concurrent or repeated restore attempts for the same player are ignored.
+     *
+     * @param player player whose snapshot should be restored
+     * @param resetPlayer whether to reset temporary match state before applying the snapshot
+     * @param teleportPlayer whether to teleport to the snapshot location
+     * @param preserveExperience whether to keep the player's current experience and level
+     * @return true when the snapshot was restored and removed, false when unavailable, already restoring, or failed
+     */
+    public boolean restore(final Player player, final boolean resetPlayer, final boolean teleportPlayer,
+                           final boolean preserveExperience) {
+        final UUID uuid = player.getUniqueId();
+        final PlayerInfo info = cache.get(uuid);
+        if (info == null || !restoring.add(uuid)) {
+            return false;
+        }
+
+        try {
+            if (resetPlayer) {
+                PlayerUtil.reset(player);
+            }
+            if (teleportPlayer) {
+                teleport.tryTeleport(player, info.getLocation());
+            }
+            if (preserveExperience) {
+                info.restoreWithoutExperience(player);
+            } else {
+                info.restore(player);
+            }
+            if (!cache.remove(uuid, info)) {
+                return false;
+            }
+            persistRecoveryCache();
+            notifyPlayerStateRestored(player);
+            return true;
+        } catch (RuntimeException ex) {
+            Log.error(this, "Could not restore player state for " + player.getName()
+                    + " (" + uuid + "). The recovery snapshot was retained.", ex);
+            return false;
+        } finally {
+            restoring.remove(uuid);
+        }
+    }
+
+    private synchronized boolean persistRecoveryCache() {
+        try {
+            if (cache.isEmpty()) {
+                Files.deleteIfExists(cacheFile.toPath());
+                return true;
+            }
+
+            final Map<UUID, PlayerData> data = new HashMap<>();
+            for (final Map.Entry<UUID, PlayerInfo> entry : cache.entrySet()) {
+                data.put(entry.getKey(), PlayerData.fromPlayerInfo(entry.getValue()));
+            }
+            AtomicFileWriter.writeUtf8(cacheFile, JsonUtil.getObjectWriter().writeValueAsString(data));
+            return true;
+        } catch (IOException | RuntimeException ex) {
+            Log.error(this, "Could not persist player recovery snapshots. Matches without a durable snapshot are blocked.", ex);
+            return false;
+        }
+    }
+
+    private void notifyPlayerStateRestored(final Player player) {
+        if (!plugin.isEnabled() || plugin.getTournamentManager() == null) {
+            return;
+        }
+        plugin.getTournamentManager().onPlayerStateRestored(player);
     }
 
     private class PlayerInfoListener implements Listener {
@@ -273,14 +374,7 @@ public class PlayerInfoManager implements Loadable {
                 return;
             }
 
-            final PlayerInfo info = remove(player);
-
-            if (info == null) {
-                return;
-            }
-
-            teleport.tryTeleport(player, info.getLocation());
-            info.restore(player);
+            restore(player, false, true, false);
         }
 
         @EventHandler(priority = EventPriority.HIGHEST)
@@ -333,8 +427,8 @@ public class PlayerInfoManager implements Loadable {
                     }
                 }
 
-                remove(player);
-                DuelsPlugin.getFoliaLib().getScheduler().runAtEntity(player, task -> info.restore(player));
+                DuelsPlugin.getFoliaLib().getScheduler().runAtEntity(player,
+                        task -> restore(player, false, false, false));
             }, 1L);
         }
     }

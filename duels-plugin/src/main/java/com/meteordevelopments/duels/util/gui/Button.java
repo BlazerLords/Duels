@@ -14,6 +14,7 @@ import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.SkullMeta;
+import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.util.ArrayList;
@@ -119,5 +120,9 @@ public class Button<P extends JavaPlugin> {
     }
 
     public void onClick(final Player player) {
+    }
+
+    public void onClick(final Player player, final InventoryClickEvent event) {
+        onClick(player);
     }
 }

@@ -59,7 +59,10 @@ public class PartyManagerImpl implements Loadable, Listener {
 
     @Override
     public void handleUnload() {
-        plugin.cancelTask(autoDisbandTask);
+        if (autoDisbandTask != null && !autoDisbandTask.isCancelled()) {
+            plugin.cancelTask(autoDisbandTask);
+        }
+        autoDisbandTask = null;
         invites.clear();
         parties.clear();
         partyMap.clear();

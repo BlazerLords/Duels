@@ -3,6 +3,7 @@ package com.meteordevelopments.duels.data;
 import com.meteordevelopments.duels.DuelsPlugin;
 import com.meteordevelopments.duels.core.kit.KitImpl;
 import com.meteordevelopments.duels.core.kit.KitImpl.Characteristic;
+import com.meteordevelopments.duels.arena.destructible.DestructibleArenaConfig;
 import com.meteordevelopments.duels.util.Log;
 import com.meteordevelopments.duels.util.inventory.ItemBuilder;
 import org.bukkit.Material;
@@ -19,6 +20,7 @@ public class KitData {
     private boolean usePermission;
     private boolean arenaSpecific;
     private Set<Characteristic> characteristics = new HashSet<>();
+    private DestructibleArenaConfig destructibleArena = new DestructibleArenaConfig();
     private Map<String, Map<Integer, ItemData>> items = new HashMap<>();
     // for Gson deserializer
     private KitData() {
@@ -30,6 +32,7 @@ public class KitData {
         this.usePermission = kit.isUsePermission();
         this.arenaSpecific = kit.isArenaSpecific();
         this.characteristics.addAll(kit.getCharacteristics());
+        this.destructibleArena = kit.getDestructibleArena().copy();
 
         for (final Map.Entry<String, Map<Integer, ItemStack>> entry : kit.getItems().entrySet()) {
             final Map<Integer, ItemData> data = new HashMap<>();
@@ -52,7 +55,8 @@ public class KitData {
             displayed = ItemBuilder.of(Material.BARRIER).name("&cCould not load displayed item for " + name + "!", plugin.getLang()).build();
         }
 
-        final KitImpl kit = new KitImpl(plugin, name, displayed, usePermission, arenaSpecific, characteristics);
+        final KitImpl kit = new KitImpl(plugin, name, displayed, usePermission, arenaSpecific, characteristics,
+                destructibleArena == null ? new DestructibleArenaConfig() : destructibleArena);
 
         for (final Map.Entry<String, Map<Integer, ItemData>> entry : items.entrySet()) {
             final Map<Integer, ItemStack> data = new HashMap<>();

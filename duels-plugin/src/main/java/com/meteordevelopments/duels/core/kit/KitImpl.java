@@ -5,6 +5,7 @@ import lombok.Getter;
 import lombok.Setter;
 import com.meteordevelopments.duels.DuelsPlugin;
 import com.meteordevelopments.duels.Permissions;
+import com.meteordevelopments.duels.arena.destructible.DestructibleArenaConfig;
 import com.meteordevelopments.duels.api.event.kit.KitEquipEvent;
 import com.meteordevelopments.duels.api.kit.Kit;
 import com.meteordevelopments.duels.gui.BaseButton;
@@ -34,11 +35,19 @@ public class KitImpl extends BaseButton implements Kit {
     @Getter
     private Set<Characteristic> characteristics;
     @Getter
+    private final DestructibleArenaConfig destructibleArena;
+    @Getter
     @Setter(value = AccessLevel.PACKAGE)
     private boolean removed;
 
     public KitImpl(final DuelsPlugin plugin, final String name, final ItemStack displayed, final boolean usePermission,
                    final boolean arenaSpecific, final Set<Characteristic> characteristics) {
+        this(plugin, name, displayed, usePermission, arenaSpecific, characteristics, new DestructibleArenaConfig());
+    }
+
+    public KitImpl(final DuelsPlugin plugin, final String name, final ItemStack displayed, final boolean usePermission,
+                   final boolean arenaSpecific, final Set<Characteristic> characteristics,
+                   final DestructibleArenaConfig destructibleArena) {
         super(plugin, displayed != null ? displayed : ItemBuilder
                 .of(Material.DIAMOND_SWORD)
                 .name("&7&l" + name, plugin.getLang())
@@ -48,6 +57,7 @@ public class KitImpl extends BaseButton implements Kit {
         this.usePermission = usePermission;
         this.arenaSpecific = arenaSpecific;
         this.characteristics = characteristics;
+        this.destructibleArena = destructibleArena == null ? new DestructibleArenaConfig() : destructibleArena;
     }
 
     public KitImpl(final DuelsPlugin plugin, final String name, final PlayerInventory inventory) {
@@ -77,6 +87,10 @@ public class KitImpl extends BaseButton implements Kit {
         } else {
             characteristics.add(characteristic);
         }
+        kitManager.saveKits();
+    }
+
+    public void saveDestructibleArena() {
         kitManager.saveKits();
     }
 

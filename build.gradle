@@ -10,7 +10,7 @@ buildscript {
 
 allprojects {
     group = 'com.meteordevelopments'
-    version = '7.0'
+    version = '7.3'
 }
 
 subprojects {
@@ -21,12 +21,12 @@ subprojects {
 
     java {
         toolchain {
-            languageVersion = JavaLanguageVersion.of(21)
+            languageVersion = JavaLanguageVersion.of(25)
         }
     }
 
     tasks.withType(JavaCompile).configureEach {
-        options.release.set(21)
+        options.release.set(25)
     }
 
     repositories {

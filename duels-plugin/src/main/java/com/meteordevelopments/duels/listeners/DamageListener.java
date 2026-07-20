@@ -5,7 +5,6 @@ import com.meteordevelopments.duels.core.arena.ArenaImpl;
 import com.meteordevelopments.duels.core.arena.ArenaManagerImpl;
 import com.meteordevelopments.duels.party.PartyManagerImpl;
 import com.meteordevelopments.duels.util.EventUtil;
-import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -25,7 +24,7 @@ public class DamageListener implements Listener {
         this.partyManager = plugin.getPartyManager();
 
         if (plugin.getConfiguration().isForceAllowCombat()) {
-            plugin.doSyncAfter(() -> Bukkit.getPluginManager().registerEvents(this, plugin), 1L);
+            plugin.doSyncAfter(() -> plugin.registerListener(this), 1L);
         }
     }
 

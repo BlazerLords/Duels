@@ -264,7 +264,7 @@ public class BettingGui extends AbstractGui<DuelsPlugin> {
         @Override
         public void run() {
             if (cancelWait) {
-                task.cancel();
+                DuelsPlugin.getInstance().cancelTask(task);
                 return;
             }
 
@@ -284,7 +284,7 @@ public class BettingGui extends AbstractGui<DuelsPlugin> {
                 counter++;
                 return;
             }
-            task.cancel();
+            DuelsPlugin.getInstance().cancelTask(task);
             waitDone = true;
 
             final Player sender = Bukkit.getPlayer(BettingGui.this.sender);

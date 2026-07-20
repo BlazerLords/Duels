@@ -6,7 +6,6 @@ import com.meteordevelopments.duels.core.arena.ArenaManagerImpl;
 import com.meteordevelopments.duels.core.match.team.TeamDuelMatch;
 import com.meteordevelopments.duels.core.spectate.SpectateManagerImpl;
 import com.meteordevelopments.duels.util.compat.CompatUtil;
-import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -29,7 +28,7 @@ public class LingerPotionListener {
             return;
         }
 
-        Bukkit.getPluginManager().registerEvents(new Post1_9Listener(), plugin);
+        plugin.registerListener(new Post1_9Listener());
     }
 
     public class Post1_9Listener implements Listener {

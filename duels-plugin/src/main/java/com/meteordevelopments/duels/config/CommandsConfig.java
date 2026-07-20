@@ -86,7 +86,8 @@ public class CommandsConfig extends AbstractConfiguration<DuelsPlugin> {
         QUEUE("queue", List.of("q")),
         SPECTATE("spectate", List.of("spec")),
         DUELS("duels", List.of("ds")),
-        KIT("kit", Collections.emptyList());
+        KIT("kit", Collections.emptyList()),
+        TOURNAMENT("tournament", List.of("tour"));
 
         private final String path;
         private final String defaultName;
